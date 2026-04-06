@@ -2270,7 +2270,7 @@ def cmd_settle(chat_id, raw):
             try:
                 from decision_engine import (
                     record_channel_outcome, record_kelly_outcome,
-                    record_ml_outcome, record_causality_outcome,
+                    record_ml_outcome, record_causality_outcome, pe_flush,
                 )
                 _hit = (result == "win")
 
@@ -2310,6 +2310,13 @@ def cmd_settle(chat_id, raw):
                         record_causality_outcome(result, _inf_stat, "UNKNOWN", _all_causes)
                 except Exception:
                     record_causality_outcome(result, "points", "UNKNOWN", [])
+
+                # Persist causality + pattern state immediately so a restart
+                # before the nightly cycle doesn't erase today's learning.
+                try:
+                    pe_flush()
+                except Exception:
+                    pass
             except Exception as _sle:
                 print(f"[Settle] self-learning error: {_sle}")
 
@@ -4928,6 +4935,14 @@ def _grade_shadow_picks_for_game(game_id, game_date):
     cur.close()
     conn.close()
     print(f"[Shadow] Graded {graded} shadow picks for game {game_id}")
+
+    # Persist causality + pattern state immediately after grading this game's
+    # shadow picks — so a restart before the nightly cycle doesn't lose signal.
+    try:
+        from decision_engine import pe_flush as _pef
+        _pef()
+    except Exception as _pfe:
+        print(f"[Shadow] pe_flush error (non-fatal): {_pfe}")
 
 
 def _auto_adjust_model():
