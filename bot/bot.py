@@ -12802,12 +12802,13 @@ def run():
         else:
             print(f"[FullCard] No picks cleared threshold tonight — card suppressed")
 
-    # ── PLAYER PROP EDGES (only when games are within 65 min of tip) ──────
-    if not _games_in_window:
-        print("[PROPS] No games in pre-game window — skipping player props")
-        save_status(picks_count)
-        return picks_count
-    player_picks = run_full_system()  # sends VIP messages and saves to DB internally
+    # ── PLAYER PROP EDGES — fired by _fire_prop_wave() at tip-2h, not here ──────
+    # Props are precision-timed: the main loop calls _fire_prop_wave() once per day
+    # at exactly 2 hours before the earliest tip-off, pulling a fresh FanDuel batch.
+    # Skipping the old _games_in_window gate to avoid early/empty fetches.
+    save_status(picks_count)
+    return picks_count
+    player_picks = run_full_system()  # kept for direct calls only (unreachable via run())
     from decision_engine import implied_probability as _ip_prop
     for pk in player_picks:
         confidence  = pk.get("confidence", 0)
@@ -13011,7 +13012,8 @@ def send_avoid_list():
 # ==========================
 # 📊 DAILY SYSTEM (VIP LOCK + Auto Parlay Builder)
 # ==========================
-_system_sent_date = None
+_system_sent_date  = None
+_prop_wave_fired   = None   # ET date string — prop wave fires once at tip-2h
 
 
 def _parlay_odds(n_legs, decimal_per_leg=1.909):
@@ -13019,6 +13021,118 @@ def _parlay_odds(n_legs, decimal_per_leg=1.909):
     combined = decimal_per_leg ** n_legs
     american = int((combined - 1) * 100)
     return american
+
+
+def _should_fire_prop_wave() -> bool:
+    """
+    Returns True exactly once per day when ET time >= earliest tip-off minus 2 hours.
+    Uses the schedule cache (already populated by send_daily_system) — no extra API call.
+    """
+    global _prop_wave_fired
+    import zoneinfo as _zi
+    try:
+        et_now = datetime.now(_zi.ZoneInfo("America/New_York"))
+    except Exception:
+        et_now = datetime.utcnow()
+
+    today_str = et_now.strftime("%Y-%m-%d")
+    if _prop_wave_fired == today_str:
+        return False
+
+    # Ensure schedule cache is fresh
+    if _schedule_cache.get("date") != today_str:
+        _refresh_schedule_cache()
+
+    start = _schedule_cache.get("window_start")  # already = earliest_tip - 3h
+    if not start:
+        return False
+
+    # Fire at earliest tip-off minus 2 hours (1 hour into the existing 3h window)
+    fire_at = start + timedelta(hours=1)
+    if et_now >= fire_at:
+        print(f"[PropWave] Triggered at {et_now.strftime('%-I:%M %p ET')} (fire_at={fire_at.strftime('%-I:%M %p ET')})")
+        return True
+    return False
+
+
+def _fire_prop_wave():
+    """
+    Precision-timed prop wave — fires once per day at tip-2h.
+    1. Force-refreshes player prop lines from FanDuel (all games in one batch).
+    2. Scores props via run_full_system() → picks saved to DB + _todays_parlay_legs.
+    3. Sends per-game Elite Game Lines and SGPs.
+    4. Sends CGP from the full combined pool.
+    """
+    global _prop_wave_fired
+    import zoneinfo as _zi
+    try:
+        today_str = datetime.now(_zi.ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    except Exception:
+        today_str = datetime.utcnow().strftime("%Y-%m-%d")
+
+    print(f"[PropWave] Firing prop wave for {today_str} — force-fetching all game props...")
+
+    # Force refresh the prop cache for all tonight's games at once
+    get_player_props(force=True)
+
+    # Score and send props (saves to DB + populates _todays_parlay_legs)
+    try:
+        player_picks = run_full_system()
+        from decision_engine import implied_probability as _ip_pw
+        for pk in player_picks:
+            confidence = pk.get("confidence", 0)
+            prop_type  = pk.get("prop_type", "props")
+            _pk_game   = pk.get("game", pk.get("player", ""))
+            _pk_odds   = pk.get("odds", -115)
+            _pk_line   = pk.get("line") or 0
+            _pk_pred   = pk.get("prediction") or _pk_line
+            _pk_std    = _PROP_STD.get(prop_type, 5.0)
+            _pk_sf     = _norm_sf(_pk_line, _pk_pred, _pk_std)
+            _pk_prob   = round(_pk_sf if pk.get("pick", "OVER").upper() == "OVER" else 1.0 - _pk_sf, 4)
+            _todays_parlay_legs.append({
+                "desc":        f"{pk.get('player')} {pk.get('pick','OVER')} {_pk_line} {prop_type}",
+                "game":        _pk_game,
+                "bet_type":    prop_type,
+                "edge":        round(_pk_prob - _ip_pw(_pk_odds), 4),
+                "confidence":  confidence,
+                "correlation": pk.get("pick", "OVER").upper(),
+                "team":        pk.get("team"),
+                "team_role":   pk.get("role", "unknown"),
+                "is_starter":  pk.get("is_starter", True),
+                "avg_mins":    pk.get("avg_mins", 30),
+            })
+        print(f"[PropWave] run_full_system returned {len(player_picks)} picks")
+    except Exception as _pw_err:
+        print(f"[PropWave] run_full_system error: {_pw_err}")
+
+    # Send CGP from full pool
+    try:
+        send_cgp()
+    except Exception as _cgp_err:
+        print(f"[PropWave] CGP error: {_cgp_err}")
+
+    # Send per-game Elite Game Lines + SGP
+    try:
+        by_game: dict = {}
+        for leg in _todays_parlay_legs:
+            g = leg.get("game", "")
+            if g:
+                by_game.setdefault(g, []).append(leg)
+        for game_name, game_legs in by_game.items():
+            if len(game_legs) >= 2:
+                try:
+                    send_elite_player_props(game_name, game_legs)
+                except Exception as _ep_err:
+                    print(f"[PropWave] EliteProps error {game_name}: {_ep_err}")
+                try:
+                    send_sgp_for_game(game_name, game_legs)
+                except Exception as _sgp_err:
+                    print(f"[PropWave] SGP error {game_name}: {_sgp_err}")
+    except Exception as _by_err:
+        print(f"[PropWave] per-game send error: {_by_err}")
+
+    _prop_wave_fired = today_str
+    print(f"[PropWave] Complete — {len(_todays_parlay_legs)} total legs in pool")
 
 
 def _gs_supported_stats(gs) -> set:
@@ -14660,19 +14774,14 @@ def main():
                     except Exception as _adj_err:
                         print(f"[AutoAdjust] scheduler error: {_adj_err}")
 
-                # ── CGP + Per-game SGPs — fire after VIP LOCK is set OR when 8+ prop
-                #    legs are available (decoupled so both fire even on slip-fail nights)
-                if _vip_lock_desc or len(_todays_parlay_legs) >= 8:
-                    send_cgp()   # has its own daily guard — safe to call every cycle
-                    by_game = {}
-                    for leg in _todays_parlay_legs:
-                        g = leg.get("game", "")
-                        if g:
-                            by_game.setdefault(g, []).append(leg)
-                    for game_name, game_legs in by_game.items():
-                        if len(game_legs) >= 2:
-                            send_elite_player_props(game_name, game_legs)
-                            send_sgp_for_game(game_name, game_legs)
+                # ── Precision-timed Prop Wave — fires once at tip-2h ─────────────
+                # Fetches all game props in one FanDuel batch, scores them, sends
+                # per-game Elite Game Lines + SGPs, then builds the CGP.
+                if _should_fire_prop_wave():
+                    try:
+                        _fire_prop_wave()
+                    except Exception as _pw_err:
+                        print(f"[PropWave] error: {_pw_err}")
 
                 cycle += 1
 
