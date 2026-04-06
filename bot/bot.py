@@ -14103,6 +14103,7 @@ def _register_commands():
         {"command": "debugsettle",    "description": "Debug prop settlement — dumps sample rows + live BDL test"},
         {"command": "voidpending",    "description": "Void pending picks — /voidpending or /voidpending YYYY-MM-DD"},
         {"command": "checkpending",   "description": "All unsettled picks grouped by date"},
+        {"command": "props",          "description": "Prop breakdown per team (/props lakers celtics)"},
         {"command": "sgp",            "description": "Generate & post an SGP pick"},
         {"command": "parlay",         "description": "Generate & post a parlay pick"},
         {"command": "feedpick",       "description": "Post a manual feed pick"},
