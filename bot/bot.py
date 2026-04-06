@@ -14310,10 +14310,10 @@ def send_elite_player_props(game_name, game_legs):
 
 def send_sgp_for_game(game_name, game_legs):
     """
-    Hybrid per-game SGP:
-    - 🟢 SAFE: top confidence, no script filter (both teams)
-    - 🟡 BALANCED: script-filtered, both teams, light correlation
-    - 🔴 AGGRESSIVE: full script filter, both teams, strongest correlation
+    Hybrid per-game SGP — single dominant script drives all three tiers:
+    - 🟢 SAFE: script-filtered, highest-confidence legs (2-4)
+    - 🟡 BALANCED: multi-signal filtered, script-consistent (4-6)
+    - 🔴 AGGRESSIVE: widest pool, still script-consistent (6-8)
     VIP LOCK is NEVER included. Each leg saved to DB for training.
     """
     global _sgp_sent_games, _vip_lock_desc
@@ -14336,92 +14336,45 @@ def send_sgp_for_game(game_name, game_legs):
     if len(pool) < 2:
         return
 
-    # ── Game scripts (multi-signal) ──────────────────────────────────
-    game_data    = _games_data.get(game_name, {})
-    scripts      = detect_all_game_scripts(game_data)
-    script       = detect_game_script(game_data)   # single label (backward compat)
-    _ck          = combo_key(scripts)
-    try:
-        _combo_wr = load_learning_data().get("combo_win_rates", {})
-    except Exception:
-        _combo_wr = {}
+    # ── Game data ────────────────────────────────────────────────────
+    game_data = _games_data.get(game_name, {})
+    total     = float(game_data.get("total", 220) or 220)
+    spread    = abs(float(game_data.get("spread", 5.0) or 5.0))
 
-    # ── Sort by confidence ──────────────────────────────────────────
-    import random as _random
-    pool_sorted = sorted(pool, key=lambda x: x.get("confidence", 0), reverse=True)
+    # ── Dominant script selection — pick ONE script the numbers support most ──
+    # Score each detected script against the actual Vegas line and spread.
+    # The highest scorer becomes the single narrative for all three tiers.
+    scripts = detect_all_game_scripts(game_data)
+    _ck     = combo_key(scripts)
 
-    # ── 1-leg-per-player dedup — keep highest-confidence leg per player ──
-    _seen_players: set = set()
-    _deduped: list = []
-    for _leg in pool_sorted:
-        _player = (_leg.get("player") or "").strip()
-        if not _player:
-            # Extract player name from desc: everything before OVER/UNDER
-            _desc = _leg.get("desc", "")
-            for _kw in (" OVER ", " UNDER ", " over ", " under "):
-                if _kw in _desc:
-                    _player = _desc[:_desc.index(_kw)].strip()
-                    break
-        _player_key = _player.lower() if _player else ""
-        if _player_key and _player_key in _seen_players:
-            continue
-        if _player_key:
-            _seen_players.add(_player_key)
-        _deduped.append(_leg)
-    pool_sorted = _deduped
+    _SCRIPT_SCORE = {
+        "INJURY":            100,   # always overrides everything
+        "TRANSITION_HEAVY":  total * 0.45,
+        "UPTEMPO":           total * 0.40,
+        "BLOWOUT":           spread * 9,
+        "DOUBLE_DIGIT_LEAD": spread * 7,
+        "TIGHT_GAME":        max(0, (6 - spread)) * 12,
+        "HALFCOURT":         max(0, (215 - total)) * 0.5,
+        "SLOW_PACED":        max(0, (218 - total)) * 0.4,
+        "UPSET":             30,
+        "COMPETITIVE":       10,
+    }
+    dominant_script = max(scripts, key=lambda sc: _SCRIPT_SCORE.get(sc, 0))
 
-    # ── Game-script supported stats (both teams benefit equally in SGP) ──
-    try:
-        from bot.game_script import analyze_game_script as _ags
-        _gs_obj = _ags(
-            game_data.get("home_team", ""), game_data.get("away_team", ""),
-            float(game_data.get("total", 220)), abs(float(game_data.get("spread", 5.0))),
-            game_name
-        ) if game_data else None
-        _gs_supported = _gs_supported_stats(_gs_obj)
-    except Exception:
-        _gs_supported = {"points", "rebounds", "assists", "threes"}
-
-    # Bucket by script alignment — applies to both teams equally in same game
-    _supported_legs = [l for l in pool_sorted if l.get("bet_type", "") in _gs_supported]
-    _neutral_legs   = [l for l in pool_sorted if l.get("bet_type", "") not in _gs_supported]
-
-    # ── SAFE: script-supported picks from either team, 2-4 legs ─────
-    safe_size = _random.randint(2, 4)
-    safe = _supported_legs[:safe_size]
-    if len(safe) < 2:
-        safe = pool_sorted[:safe_size]   # fallback if not enough supported
-
-    # ── BALANCED: multi-signal filter across both teams, 4-6 legs ───
-    def _multi_filter(leg):
-        allow, mult = fits_multi_script(leg, scripts, _combo_wr)
-        if not allow:
-            return None
-        boosted = dict(leg)
-        boosted["confidence"] = min(98, round(leg.get("confidence", 0) * mult, 1))
-        return boosted
-
-    bal_size     = _random.randint(4, 6)
-    bal_pool_raw = [_multi_filter(l) for l in pool_sorted]
-    bal_pool     = [l for l in bal_pool_raw if l is not None]
-    balanced     = bal_pool[:bal_size]
-    if len(balanced) < 4:
-        balanced = pool_sorted[:min(bal_size, len(pool_sorted))]
-
-    # ── AGGRESSIVE: full pool from both teams, 6-8 legs ─────────────
-    agg_size   = _random.randint(6, 8)
-    aggressive = bal_pool[:agg_size]
-    if len(aggressive) < 6:
-        aggressive = pool_sorted[:min(agg_size, len(pool_sorted))]
-
-    def _ls(leg):
-        icon = EMOJI_MAP.get(leg.get("bet_type", ""), "🎯")
-        conf = int(leg.get("confidence", 0))
-        return f"  {icon} {leg['desc']} — {conf}%"
-
-    safe_odds = _parlay_odds(len(safe))
-    bal_odds  = _parlay_odds(len(balanced))
-    agg_odds  = _parlay_odds(len(aggressive))
+    # Short one-line reason shown in the message header
+    _SCRIPT_REASON = {
+        "TRANSITION_HEAVY":  f"Vegas total {total:.1f} — market pricing a shootout",
+        "UPTEMPO":           f"Vegas total {total:.1f} — fast-paced scoring expected",
+        "BLOWOUT":           f"Spread {spread:.1f} — market expects a comfortable win",
+        "DOUBLE_DIGIT_LEAD": f"Spread {spread:.1f} — one team priced to pull away",
+        "TIGHT_GAME":        f"Spread {spread:.1f} — wire-to-wire battle expected",
+        "HALFCOURT":         f"Vegas total {total:.1f} — defensive grind tonight",
+        "SLOW_PACED":        f"Vegas total {total:.1f} — slow pace, low scoring",
+        "UPSET":             f"Model disagrees with Vegas — underdog value detected",
+        "INJURY":            "Key injury changes usage — targeting role player spikes",
+        "COMPETITIVE":       f"Spread {spread:.1f}, total {total:.1f} — balanced matchup",
+    }
+    _script_reason = _SCRIPT_REASON.get(dominant_script, "")
 
     SCRIPT_LABEL = {
         "TRANSITION_HEAVY":  "🟡 Transition/Shootout",
@@ -14437,14 +14390,87 @@ def send_sgp_for_game(game_name, game_legs):
         "UPSET":             "🔴 Underdog Upset",
         "INJURY":            "🟣 Injury / Usage Spike",
     }
-    # Build a readable label for all active scripts
-    _script_parts  = [SCRIPT_LABEL.get(sc, sc) for sc in scripts]
-    _script_display = " + ".join(_script_parts) if len(_script_parts) > 1 else _script_parts[0]
+    _script_display = SCRIPT_LABEL.get(dominant_script, dominant_script)
+
+    try:
+        _combo_wr = load_learning_data().get("combo_win_rates", {})
+    except Exception:
+        _combo_wr = {}
+
+    # ── Sort by confidence ──────────────────────────────────────────
+    import random as _random
+    pool_sorted = sorted(pool, key=lambda x: x.get("confidence", 0), reverse=True)
+
+    # ── 1-leg-per-player dedup — keep highest-confidence leg per player ──
+    _seen_players: set = set()
+    _deduped: list = []
+    for _leg in pool_sorted:
+        _player = (_leg.get("player") or "").strip()
+        if not _player:
+            _desc = _leg.get("desc", "")
+            for _kw in (" OVER ", " UNDER ", " over ", " under "):
+                if _kw in _desc:
+                    _player = _desc[:_desc.index(_kw)].strip()
+                    break
+        _player_key = _player.lower() if _player else ""
+        if _player_key and _player_key in _seen_players:
+            continue
+        if _player_key:
+            _seen_players.add(_player_key)
+        _deduped.append(_leg)
+    pool_sorted = _deduped
+
+    # ── Apply dominant script filter to every leg ────────────────────
+    # All three tiers now tell the same story — no tier bypasses the script.
+    def _script_filter(leg):
+        return fits_script(leg, dominant_script)
+
+    script_pool = [l for l in pool_sorted if _script_filter(l)]
+    # If the script is too strict and filters everything, fall back gracefully
+    if len(script_pool) < 2:
+        script_pool = pool_sorted
+
+    # ── SAFE: top script-consistent legs, 2-4 ───────────────────────
+    safe_size = _random.randint(2, 4)
+    safe      = script_pool[:safe_size]
+
+    # ── BALANCED: multi-signal filtered within the dominant script, 4-6 ──
+    def _multi_filter(leg):
+        allow, mult = fits_multi_script(leg, [dominant_script], _combo_wr)
+        if not allow:
+            return None
+        boosted = dict(leg)
+        boosted["confidence"] = min(98, round(leg.get("confidence", 0) * mult, 1))
+        return boosted
+
+    bal_size     = _random.randint(4, 6)
+    bal_pool_raw = [_multi_filter(l) for l in script_pool]
+    bal_pool     = [l for l in bal_pool_raw if l is not None]
+    balanced     = bal_pool[:bal_size]
+    if len(balanced) < 4:
+        balanced = script_pool[:min(bal_size, len(script_pool))]
+
+    # ── AGGRESSIVE: widest script-consistent pool, 6-8 ──────────────
+    agg_size   = _random.randint(6, 8)
+    aggressive = bal_pool[:agg_size]
+    if len(aggressive) < 6:
+        aggressive = script_pool[:min(agg_size, len(script_pool))]
+
+    def _ls(leg):
+        icon = EMOJI_MAP.get(leg.get("bet_type", ""), "🎯")
+        conf = int(leg.get("confidence", 0))
+        return f"  {icon} {leg['desc']} — {conf}%"
+
+    safe_odds = _parlay_odds(len(safe))
+    bal_odds  = _parlay_odds(len(balanced))
+    agg_odds  = _parlay_odds(len(aggressive))
+
     D = "━━━━━━━━━━━━━━━━━━━"
 
     msg = "\n".join([
         f"🎲 *ELITE SGP — {game_name}*",
         f"_Script: {_script_display}_",
+        f"_{_script_reason}_",
         f"",
         f"🟢 *SAFE ({len(safe)} legs)*",
         *[_ls(l) for l in safe],
@@ -14483,11 +14509,11 @@ def send_sgp_for_game(game_name, game_legs):
             "confidence":    leg.get("confidence", 0),
             "time":          str(datetime.now()),
             "result":        None,
-            "script":        script,
+            "script":        dominant_script,
             "script_combo":  _ck,
         })
 
-    print(f"[SGP] {game_name} · Scripts:{_ck} · {len(safe)}S/{len(balanced)}B/{len(aggressive)}A · {len(all_sgp_legs)} legs saved to DB")
+    print(f"[SGP] {game_name} · Dominant:{dominant_script} · All:{_ck} · {len(safe)}S/{len(balanced)}B/{len(aggressive)}A · {len(all_sgp_legs)} legs saved to DB")
 
 
 # ==========================
