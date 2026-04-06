@@ -14086,11 +14086,13 @@ def _register_commands():
 
     public_commands = [
         {"command": "start",      "description": "Help & info"},
+        {"command": "help",       "description": "Help & info"},
         {"command": "picks",      "description": "Today's picks"},
         {"command": "schedule",   "description": "Today's NBA schedule"},
         {"command": "record",     "description": "Bot win/loss record"},
         {"command": "subscribe",  "description": "Join VIP ($29/mo — 7-day free trial)"},
         {"command": "vip",        "description": "Join VIP ($29/mo — 7-day free trial)"},
+        {"command": "join",       "description": "Join VIP ($29/mo — 7-day free trial)"},
         {"command": "thresholds", "description": "Confidence thresholds"},
     ]
 
@@ -14102,6 +14104,7 @@ def _register_commands():
         {"command": "voidpending",    "description": "Void pending picks — /voidpending or /voidpending YYYY-MM-DD"},
         {"command": "checkpending",   "description": "All unsettled picks grouped by date"},
         {"command": "sgp",            "description": "Generate & post an SGP pick"},
+        {"command": "parlay",         "description": "Generate & post a parlay pick"},
         {"command": "feedpick",       "description": "Post a manual feed pick"},
         {"command": "editfeedpick",   "description": "Edit a feed pick (/editfeedpick <id> <text>)"},
         {"command": "deletefeedpick", "description": "Delete a feed pick (/deletefeedpick <id>)"},
