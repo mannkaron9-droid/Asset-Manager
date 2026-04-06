@@ -8622,7 +8622,9 @@ def update_results():
                             return "assists",  float(stat_row.get("ast")  or 0)
                         if "three" in _part or "fg3" in _part or "3pt" in _part:
                             return "threes",   float(stat_row.get("fg3m") or 0)
-                    # Legacy bare OVER/UNDER — infer from closest stat to stored line
+                    # Legacy bare OVER/UNDER — infer from closest BDL stat.
+                    # The bot only makes single-stat props (no PRA combos), so
+                    # the nearest stat is always the correct one.
                     try:
                         _ln = float(stored_line or 0)
                         _candidates_stat = {
@@ -8631,10 +8633,7 @@ def update_results():
                             "assists":  abs(float(stat_row.get("ast")  or 0) - _ln),
                             "threes":   abs(float(stat_row.get("fg3m") or 0) - _ln),
                         }
-                        _best = min(_candidates_stat, key=_candidates_stat.get)
-                        _best_dist = _candidates_stat[_best]
-                        if _best_dist > 8:
-                            return None, None  # No stat is plausibly close to this line
+                        _best    = min(_candidates_stat, key=_candidates_stat.get)
                         _bdl_key = _STAT_BDL[_best]
                         return _best, float(stat_row.get(_bdl_key) or 0)
                     except Exception:
