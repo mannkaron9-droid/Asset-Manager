@@ -11594,6 +11594,23 @@ def run_edge_fade_7():
         # All historical win-rate learning: by prop type, by script, by role
         _wr_ctx = _load_win_rate_context()
 
+        # ── Query players already bet today — prevent same player re-picks ──────
+        _bet_players_today: set = set()
+        try:
+            _dup_conn = _db_conn()
+            _dup_cur  = _dup_conn.cursor()
+            _dup_cur.execute(
+                "SELECT DISTINCT player FROM bets "
+                "WHERE DATE(bet_time) = CURRENT_DATE "
+                "  AND player IS NOT NULL AND player != ''"
+            )
+            _bet_players_today = {r[0].strip().lower() for r in _dup_cur.fetchall()}
+            _dup_cur.close(); _dup_conn.close()
+            if _bet_players_today:
+                print(f"[EdgeFade7] Skipping {len(_bet_players_today)} already-bet players today")
+        except Exception as _de:
+            print(f"[EdgeFade7] Daily dedup query failed (fail-open): {_de}")
+
         slip, vip_msg, free_msg = build_slip_from_props(
             props_data          = odds_data,
             get_player_stats_fn = get_player_stats,
@@ -11606,6 +11623,7 @@ def run_edge_fade_7():
             shadow_hit_rates    = _shadow_rates,
             win_rate_context    = _wr_ctx,
             conf_multipliers    = _conf_mults,
+            players_bet_today   = _bet_players_today,
         )
 
         if slip is None:
