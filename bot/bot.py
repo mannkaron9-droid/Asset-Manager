@@ -7893,7 +7893,8 @@ def save_bet(bet):
             # pick direction/line/stat in the same game both get saved.
             _dup_player = bet.get("player") or ""
             cur.execute(
-                "SELECT id FROM bets WHERE game=%s AND pick=%s AND bet_type=%s AND COALESCE(player,'')=%s",
+                "SELECT id FROM bets WHERE game=%s AND pick=%s AND bet_type=%s AND COALESCE(player,'')=%s "
+                "AND DATE(COALESCE(bet_time, created_at)) = CURRENT_DATE",
                 (bet.get("game",""), bet.get("pick",""), bet.get("betType",""), _dup_player)
             )
             if cur.fetchone():
@@ -14035,6 +14036,26 @@ def send_sgp_for_game(game_name, game_legs):
     # ── Sort by confidence ──────────────────────────────────────────
     import random as _random
     pool_sorted = sorted(pool, key=lambda x: x.get("confidence", 0), reverse=True)
+
+    # ── 1-leg-per-player dedup — keep highest-confidence leg per player ──
+    _seen_players: set = set()
+    _deduped: list = []
+    for _leg in pool_sorted:
+        _player = (_leg.get("player") or "").strip()
+        if not _player:
+            # Extract player name from desc: everything before OVER/UNDER
+            _desc = _leg.get("desc", "")
+            for _kw in (" OVER ", " UNDER ", " over ", " under "):
+                if _kw in _desc:
+                    _player = _desc[:_desc.index(_kw)].strip()
+                    break
+        _player_key = _player.lower() if _player else ""
+        if _player_key and _player_key in _seen_players:
+            continue
+        if _player_key:
+            _seen_players.add(_player_key)
+        _deduped.append(_leg)
+    pool_sorted = _deduped
 
     # ── Game-script supported stats (both teams benefit equally in SGP) ──
     try:
