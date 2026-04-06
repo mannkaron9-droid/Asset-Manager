@@ -1604,11 +1604,20 @@ def build_and_grade_slip(
             filtered_bene.append(b)
 
     # ── Build fill pool (everything not pinned) ───────────────────────────────
-    fill_pool_base = [
+    _fill_all = [
         l for l in candidates
         if not l.is_fade and not l.is_benefactor
         and l.player not in seen_players
     ]
+    # Max 1 leg per player in fill pool — keep highest-confidence leg only.
+    # Prevents the same player stacking multiple props in a single slip
+    # (e.g. Vassell points + rebounds + assists = 3 correlated legs that all
+    # win/lose together, massively amplifying variance).
+    _fill_dedup: dict = {}
+    for _fl in sorted(_fill_all, key=lambda l: l.confidence, reverse=True):
+        if _fl.player not in _fill_dedup:
+            _fill_dedup[_fl.player] = _fl
+    fill_pool_base = list(_fill_dedup.values())
 
     # ── Script confidence penalty — off-script legs stay in pool but take
     #    a -10% confidence hit so they lose to script-aligned legs naturally
@@ -1947,7 +1956,7 @@ def analyze_patterns() -> list:
     insights = []
     totals   = [d["total"] for d in _pattern_db.values() if d["total"] > 0]
     avg_samp = sum(totals) / len(totals) if totals else 1
-    _pe_config["min_samples"] = max(3, int(avg_samp * 0.5))
+    _pe_config["min_samples"] = min(30, max(3, int(avg_samp * 0.5)))
     for k, data in _pattern_db.items():
         total = data["total"]
         if total < _pe_config["min_samples"]:
