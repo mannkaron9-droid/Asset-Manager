@@ -680,11 +680,14 @@ def validate_slip(legs: list, game_script: Optional[GameScript] = None) -> Valid
     checks["script_alignment"] = (script_ok, script_reason)
 
     # ── Check 6: Hidden trap check ─────────────────────────────────────────────
-    trap_legs = [l for l in legs if l.odds <= -250]
+    # Only flag as trap if BOTH odds are heavy AND line_rating is poor.
+    # A -250 leg where the player consistently clears the line (ELITE/GOOD rating)
+    # is not a trap — FanDuel priced it heavy because it's likely to hit.
+    trap_legs = [l for l in legs if l.odds <= -250 and l.line_rating in ("MID", "BAD")]
     trap_ok = len(trap_legs) == 0
     trap_reason = (
         "No hidden traps" if trap_ok
-        else f"TRAP DETECTED: {[l.player for l in trap_legs]} priced at -250 or worse"
+        else f"TRAP DETECTED: {[l.player for l in trap_legs]} — heavy odds + poor line value"
     )
     checks["hidden_trap"] = (trap_ok, trap_reason)
 
