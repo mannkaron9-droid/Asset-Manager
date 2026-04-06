@@ -219,6 +219,15 @@ def load_thresholds_from_db(conn) -> dict:
     return {}
 
 
+def classify_tier(conn) -> str:
+    """
+    Return the current performance tier string based on recent DB win rate.
+    Used by L9 of run_full_pipeline to select the correct threshold preset.
+    """
+    win_rate, _, _ = compute_win_rate_from_db(conn)
+    return _win_rate_to_tier(win_rate)
+
+
 def run_adaptive_update(conn) -> dict:
     """
     Main entry point. Call this:
