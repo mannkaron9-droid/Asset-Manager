@@ -143,6 +143,7 @@ def build_slip_from_props(
     back_to_back_teams: set = None,# teams on second night in a row — fatigue penalty
     shadow_hit_rates: dict = None, # {"{player}:{stat}": {"rate": 0.xx, "total": n}} from learning
     win_rate_context: dict = None, # all historical win-rate learning from settled bets
+    conf_multipliers: dict = None, # {category: multiplier} from nightly learning
 ) -> tuple:
     """
     Main entry point for the Edge-Fade 7 slip builder.
@@ -521,6 +522,20 @@ def build_slip_from_props(
 
     print(f"[SlipBuilder] Slip grade: {slip.grade} | Legs: {len(slip.legs)} | "
           f"Payout: +{slip.estimated_payout:.0f}")
+
+    # Apply learned confidence multipliers to each leg before formatting.
+    # These are nightly-updated category multipliers (fade_prop, neutral_prop, etc.)
+    # that reflect actual win rates per pick type — directly affects what users see.
+    if conf_multipliers:
+        for leg in slip.legs:
+            if leg.is_fade:
+                cat = "fade_prop"
+            elif leg.is_benefactor:
+                cat = "benefactor_prop"
+            else:
+                cat = "neutral_prop"
+            mult = conf_multipliers.get(cat, 1.0)
+            leg.confidence = round(max(40.0, min(99.0, leg.confidence * mult)), 1)
 
     vip_msg  = format_vip_slip(slip, checkout_url)
     free_msg = format_free_teaser(slip, checkout_url)
