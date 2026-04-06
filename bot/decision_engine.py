@@ -668,16 +668,12 @@ def validate_slip(legs: list, game_script: Optional[GameScript] = None) -> Valid
     checks["juice_check"] = (juice_ok, juice_reason)
 
     # ── Check 5: Script alignment ──────────────────────────────────────────────
-    script_ok = True
-    script_reason = "All legs fit game script"
-    if game_script:
-        for leg in legs:
-            fit = game_script_fit(leg, game_script)
-            if not fit["fits"]:
-                script_ok = False
-                script_reason = f"{leg.player} doesn't fit script: {fit['reason']}"
-                break
-    checks["script_alignment"] = (script_ok, script_reason)
+    # Script misalignment is now handled upstream via a -10% confidence penalty
+    # before Monte Carlo runs. Off-script legs lose to aligned legs naturally
+    # across shuffles. Hard-failing here stacked with other failures and caused
+    # too many D grades — confidence-based filtering is more accurate since the
+    # live monitor validates outcomes and the engine learns over time.
+    checks["script_alignment"] = (True, "Handled via confidence penalty pre-Monte Carlo")
 
     # ── Check 6: Hidden trap check ─────────────────────────────────────────────
     # Only flag as trap if BOTH odds are heavy AND line_rating is poor.
@@ -1563,6 +1559,17 @@ def build_and_grade_slip(
         if not l.is_fade and not l.is_benefactor
         and l.player not in seen_players
     ]
+
+    # ── Script confidence penalty — off-script legs stay in pool but take
+    #    a -10% confidence hit so they lose to script-aligned legs naturally
+    #    across Monte Carlo shuffles. The live monitor validates/learns from
+    #    outcomes so the engine self-calibrates over time. ─────────────────
+    if game_script:
+        for leg in fill_pool_base:
+            fit = game_script_fit(leg, game_script)
+            if not fit["fits"]:
+                leg.confidence = max(0.0, leg.confidence - 10.0)
+                print(f"  [ScriptPenalty] {leg.player} -{10}% conf → {leg.confidence:.1f}% ({fit['reason']})")
 
     best_slip: Optional[Slip] = None
     best_ev = float("-inf")
