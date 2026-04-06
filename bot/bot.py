@@ -8668,7 +8668,7 @@ def update_results():
                                        WHEN prediction IS NOT NULL THEN prediction - %s
                                        ELSE NULL
                                    END
-                             WHERE id=%s AND result IS NULL
+                             WHERE id=%s AND (result IS NULL OR result = 'void')
                         """, (_res, _actual, _actual, _rid))
                         _db_prop_conn.commit()
                         newly_settled += 1
