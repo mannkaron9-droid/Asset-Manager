@@ -6097,7 +6097,7 @@ def handle_commands():
                     except Exception:
                         _lo, _hi = 185, 256
                     try:
-                        _aconn = _db_connect()
+                        _aconn = _db_conn()
                         _acur  = _aconn.cursor()
                         _acur.execute("""
                             SELECT id, DATE(bet_time) as dt, bet_type, pick_category,
