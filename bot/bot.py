@@ -328,6 +328,7 @@ _avoid_sent_date       = None   # date string when avoid list was last sent
 _vip_lock_desc         = None   # desc of today's VIP LOCK (excluded from SGPs)
 _sgp_sent_games        = set()  # game names that already got an SGP post today
 _elite_props_sent_games = set() # game names that already got Elite Props post today
+_cgp_sent_date         = None   # date string when CGP was last sent (once per day)
 _games_data            = {}     # game_name -> {total, spread} for script detection
 
 REPLIT_DOMAIN  = os.environ.get("REPLIT_DEV_DOMAIN", "")
@@ -7852,7 +7853,7 @@ def save_status(picks_today, extra=None):
 def save_memory_state():
     """Persist all critical in-memory state to DB so a restart picks up where it left off."""
     global _system_sent_date, _vip_lock_desc, _sgp_sent_games, line_history
-    global _elite_props_sent_games, _edge_fade_sent_date
+    global _elite_props_sent_games, _edge_fade_sent_date, _cgp_sent_date
     try:
         save_status(0, {
             "_mem_system_sent_date":     _system_sent_date or "",
@@ -7861,6 +7862,7 @@ def save_memory_state():
             "_mem_line_history":         line_history,
             "_mem_elite_props_sent":     list(_elite_props_sent_games),
             "_mem_edge_fade_sent_date":  _edge_fade_sent_date or "",
+            "_mem_cgp_sent_date":        _cgp_sent_date or "",
         })
     except Exception as _sme:
         print(f"[Memory] save_memory_state error: {_sme}")
@@ -7873,7 +7875,7 @@ def restore_memory_state():
     picks up exactly where it left off — no cold starts.
     """
     global _system_sent_date, _vip_lock_desc, _sgp_sent_games, line_history
-    global _elite_props_sent_games, _edge_fade_sent_date
+    global _elite_props_sent_games, _edge_fade_sent_date, _cgp_sent_date
     import json as _json
 
     # ── 1. Operational flags (send-date guards, VIP state) ────────────────
@@ -7914,6 +7916,11 @@ def restore_memory_state():
         if saved_ef7 == today_str:
             _edge_fade_sent_date = saved_ef7
             print(f"[Memory] Restored _edge_fade_sent_date: {_edge_fade_sent_date}")
+
+        saved_cgp = st.get("_mem_cgp_sent_date", "")
+        if saved_cgp == today_str:
+            _cgp_sent_date = saved_cgp
+            print(f"[Memory] Restored _cgp_sent_date: {_cgp_sent_date}")
 
     except Exception as _rme:
         print(f"[Memory] restore_memory_state error: {_rme}")
@@ -11172,53 +11179,10 @@ def run_edge_fade_7():
                         pass
 
                 if candidates:
-                    # Guarantee at least one of each stat if available,
-                    # then fill remaining slots by confidence
-                    _stat_label = {
-                        "points": "PTS", "rebounds": "REB",
-                        "assists": "AST", "threes": "3PM",
-                    }
-                    _sorted_all = sorted(candidates, key=lambda x: x.get("confidence", 0), reverse=True)
-                    _diverse = []
-                    _used_players = set()
-                    for _want_stat in ("points", "rebounds", "assists", "threes"):
-                        for _c in _sorted_all:
-                            if (_c.get("prop_type") == _want_stat
-                                    and _c.get("player") not in _used_players):
-                                _diverse.append(_c)
-                                _used_players.add(_c.get("player"))
-                                break
-                    for _c in _sorted_all:
-                        if _c.get("player") not in _used_players:
-                            _diverse.append(_c)
-                            _used_players.add(_c.get("player"))
-                    # cap at top 7
-                    _diverse = _diverse[:7]
-
-                    _parlay_odds_fb = _parlay_odds(len(_diverse))
-                    lines = [
-                        "⚡ *EDGE-FADE PARLAY — BEST PICKS TONIGHT*",
-                        "_Full slip unavailable — engine's top stat-diverse legs bundled._",
-                        "",
-                    ]
-                    for c in _diverse:
-                        conf     = c.get("confidence", 0)
-                        ev       = c.get("ev", 0)
-                        ev_str   = f"+{ev*100:.1f}%" if ev >= 0 else f"{ev*100:.1f}%"
-                        stat_lbl = _stat_label.get(c.get("prop_type", ""), (c.get("prop_type", "")).upper())
-                        lines.append(
-                            f"🏀 {c['player']}  {c['pick']} {c['line']} {stat_lbl}\n"
-                            f"   _{conf:.0f}% conf · EV {ev_str}_"
-                        )
-                    lines += [
-                        "",
-                        f"📊 Approx: *+{_parlay_odds_fb:,}*",
-                        "⚡ _Stat-diverse · Engine cleared · All legs required_",
-                    ]
-                    send("\n".join(lines), VIP_CHANNEL)
-                    # Only stamp guard after something actually went to VIP
+                    # Individual fallback removed — CGP fires instead on slip-fail nights
+                    # Stamp the guard so Edge-Fade 7 doesn't retry this cycle
                     _edge_fade_sent_date = today_str
-                    print(f"[EdgeFade7] Fallback parlay — sent {len(_diverse)} legs to VIP")
+                    print(f"[EdgeFade7] Slip graded out — {len(candidates)} candidates available, CGP will cover tonight")
                 else:
                     # Props not posted yet — do NOT stamp guard, retry next cycle
                     print("[EdgeFade7] No candidates — props likely not posted yet, will retry")
@@ -12571,6 +12535,140 @@ def _build_cross_game_parlay(pool):
     return {"safe": safe_legs, "balanced": bal_legs, "aggressive": agg_legs}
 
 
+# ==========================
+# 🌐 CROSS GAME PARLAY SENDER
+# ==========================
+
+def send_cgp(parlay_pool=None):
+    """
+    Cross Game Parlay — fires once per day.
+    Called from send_daily_system() on good nights (pool pre-built and passed in),
+    and from the main loop when 8+ prop legs are available on slip-fail nights.
+    Has its own daily guard so it never fires twice.
+    """
+    global _cgp_sent_date, _todays_parlay_legs, _vip_lock_desc
+
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
+    # ── Restore guard from DB if memory was cleared by restart ────────────────
+    if _cgp_sent_date is None:
+        _cst = load_status()
+        if _cst.get("_cgp_sent_date") == today_str:
+            _cgp_sent_date = today_str
+
+    if _cgp_sent_date == today_str:
+        return
+
+    # ── Build pool if not passed in (slip-fail path) ──────────────────────────
+    if parlay_pool is None:
+        if not _todays_parlay_legs:
+            return
+        seen = set()
+        unique_legs = []
+        for leg in _todays_parlay_legs:
+            if leg["desc"] not in seen:
+                seen.add(leg["desc"])
+                unique_legs.append(leg)
+        # Remove VIP Lock leg so it stays standalone
+        if _vip_lock_desc:
+            unique_legs = [l for l in unique_legs if l["desc"] != _vip_lock_desc]
+        parlay_pool = unique_legs
+
+    if len(parlay_pool) < 3:
+        print("[CGP] Not enough legs to build a cross-game parlay")
+        return
+
+    EMOJI_MAP = {
+        "SPREAD": "📉", "TOTAL": "🎯", "PROP": "🏀", "MONEYLINE": "🔥",
+        "points": "🏀", "rebounds": "💪", "assists": "🔥", "threes": "🎯",
+    }
+    D = "━━━━━━━━━━━━━━━━━━━"
+
+    def _ls(leg):
+        icon = EMOJI_MAP.get(leg.get("bet_type", ""), "🎯")
+        conf = int(leg.get("confidence", 0))
+        return f"  {icon} {leg['desc']} — {conf}%"
+
+    # ── Build CGP tiers ────────────────────────────────────────────────────────
+    cgp_tiers      = _build_cross_game_parlay(parlay_pool)
+    cgp_safe       = cgp_tiers["safe"]
+    cgp_balanced   = cgp_tiers["balanced"]
+    cgp_aggressive = cgp_tiers["aggressive"]
+    cgp_all        = list({l["desc"]: l for l in cgp_safe + cgp_balanced + cgp_aggressive}.values())
+
+    if not cgp_all:
+        print("[CGP] No CGP legs built — pool too small or no cross-game coverage")
+        return
+
+    safe_odds = _parlay_odds(len(cgp_safe))
+    bal_odds  = _parlay_odds(len(cgp_balanced))
+    agg_odds  = _parlay_odds(len(cgp_aggressive))
+
+    # ── VIP message ────────────────────────────────────────────────────────────
+    cgp_lines = [
+        f"🌐 *CROSS GAME PARLAY — PLAYER PROPS*",
+        f"_Script-filtered · Props only · Each leg fits its own game_",
+        f"",
+    ]
+    if cgp_safe:
+        cgp_lines += [f"🟢 *SAFE ({len(cgp_safe)} legs)*"] + [_ls(l) for l in cgp_safe] + [f"  📊 Approx: *+{safe_odds:,}*", f""]
+    if cgp_balanced:
+        cgp_lines += [f"🟡 *BALANCED ({len(cgp_balanced)} legs)*"] + [_ls(l) for l in cgp_balanced] + [f"  📊 Approx: *+{bal_odds:,}*", f""]
+    if cgp_aggressive:
+        cgp_lines += [f"🔴 *AGGRESSIVE ({len(cgp_aggressive)} legs)*"] + [_ls(l) for l in cgp_aggressive] + [f"  📊 Approx: *+{agg_odds:,}*", f""]
+    cgp_lines += [D, f"⚡ Each leg fits its own game script · Multi-game · Props only"]
+
+    send("\n".join(cgp_lines), VIP_CHANNEL)
+
+    # ── Free channel teaser — first 2 SAFE legs only ──────────────────────────
+    if cgp_safe:
+        teaser_legs  = cgp_safe[:2]
+        teaser_lines = "\n".join([f"  {l['desc']}" for l in teaser_legs])
+        n_more       = max((len(cgp_safe) - 2) + len(cgp_balanced) + len(cgp_aggressive), 0)
+        free_msg = (
+            f"🌐 *FREE PLAY — CROSS GAME PARLAY*\n\n"
+            f"{teaser_lines}\n"
+            f"_...+{n_more} more legs in VIP (BALANCED + AGGRESSIVE tiers)_\n\n"
+            f"📊 Approx: *+{_parlay_odds(2):,}* (full parlay higher)\n\n"
+            f"🔒 Full CGP system → VIP only\n"
+            f"👉 {CHECKOUT_URL}"
+        )
+        send(free_msg, FREE_CHANNEL)
+
+    # ── Tag DB records ─────────────────────────────────────────────────────────
+    _tag_parlay_legs_db(cgp_all, "CROSS_GAME_PARLAY")
+
+    # ── Save parlay legs for morning recap ─────────────────────────────────────
+    _parlay_legs_saved = {
+        "cross_game": [{"desc": l["desc"], "game": l.get("game", ""), "bet_type": l.get("bet_type", "")} for l in cgp_all],
+    }
+    save_status(0, {"_last_parlay_legs": _parlay_legs_saved, "_last_parlay_date": today_str})
+
+    # ── Save CGP legs to DB for training ──────────────────────────────────────
+    all_cgp_unique = {l["desc"]: l for l in cgp_safe + cgp_balanced + cgp_aggressive}
+    for leg in all_cgp_unique.values():
+        save_bet({
+            "game":          leg.get("game", ""),
+            "player":        leg.get("desc", ""),
+            "pick":          leg.get("desc", ""),
+            "betType":       leg.get("bet_type", "PROP"),
+            "pick_category": "CROSS_GAME_PARLAY",
+            "line":          None,
+            "prediction":    None,
+            "odds":          0,
+            "prob":          round(leg.get("confidence", 70) / 100, 4),
+            "edge":          round(leg.get("edge", 0), 2),
+            "confidence":    leg.get("confidence", 0),
+            "time":          str(datetime.now()),
+            "result":        None,
+        })
+
+    _cgp_sent_date = today_str
+    save_status(0, {"_cgp_sent_date": today_str})
+    save_memory_state()
+    n_games = len(set(l.get("game", "") for l in cgp_all if l.get("game")))
+    print(f"[CGP] Sent — {len(cgp_all)} legs across {n_games} games")
+
 
 def send_daily_system():
     """VIP LOCK + tiered auto-parlay system. Once per day after picks are in."""
@@ -12707,118 +12805,29 @@ def send_daily_system():
     lock_badge = TIER_BADGE.get(lock_tier, "🎯 BALANCED · 2 units")
 
     EMOJI_MAP = {
-        "SPREAD":    "📉",
-        "TOTAL":     "🎯",
-        "PROP":      "🏀",
-        "MONEYLINE": "🔥",
-        "points":    "🏀",
-        "rebounds":  "💪",
-        "assists":   "🔥",
-        "threes":    "🎯",
+        "SPREAD": "📉", "TOTAL": "🎯", "PROP": "🏀", "MONEYLINE": "🔥",
+        "points": "🏀", "rebounds": "💪", "assists": "🔥", "threes": "🎯",
     }
+    D = "━━━━━━━━━━━━━━━━━━━"
 
     def _leg_line(leg):
         icon = EMOJI_MAP.get(leg.get("bet_type", ""), "🎯")
         return f"{icon} {leg['desc']} — {leg['confidence']}%"
 
-    def _parlay_block(legs):
-        if not legs:
-            return "_Not enough picks today_"
-        lines = [_leg_line(l) for l in legs]
-        odds  = _parlay_odds(len(legs))
-        lines.append(f"📊 Approx: *+{odds:,}*")
-        return "\n".join(lines)
-
-    # ── Build Cross Game Parlay (3 tiers, props only) ────────────────
-    cgp_tiers      = _build_cross_game_parlay(parlay_pool) if len(parlay_pool) >= 3 \
-                     else {"safe": [], "balanced": [], "aggressive": []}
-    cgp_safe       = cgp_tiers["safe"]
-    cgp_balanced   = cgp_tiers["balanced"]
-    cgp_aggressive = cgp_tiers["aggressive"]
-    cgp_all        = list({l["desc"]: l for l in cgp_safe + cgp_balanced + cgp_aggressive}.values())
-
-    D = "━━━━━━━━━━━━━━━━━━━"
-
-    def _ls(leg):
-        icon = EMOJI_MAP.get(leg.get("bet_type", ""), "🎯")
-        conf = int(leg.get("confidence", 0))
-        return f"  {icon} {leg['desc']} — {conf}%"
-
-    safe_odds = _parlay_odds(len(cgp_safe))
-    bal_odds  = _parlay_odds(len(cgp_balanced))
-    agg_odds  = _parlay_odds(len(cgp_aggressive))
-
-    # ── VIP message ─────────────────────────────────────────────────
-    cgp_lines = [
+    # ── Send VIP Lock as standalone message ───────────────────────────────────
+    lock_msg = "\n".join([
         f"🔒 *VIP LOCK — BEST PLAY OF THE DAY*",
         f"",
         f"{_leg_line(vip_lock)}",
         f"{lock_badge}",
         f"⚡ Standalone only — do not parlay this",
-        D,
-        f"🌐 *CROSS GAME PARLAY — PLAYER PROPS*",
-        f"_Script-filtered · Props only · Each leg fits its own game_",
-        f"",
-    ]
-    if cgp_safe:
-        cgp_lines += [f"🟢 *SAFE ({len(cgp_safe)} legs)*"] + [_ls(l) for l in cgp_safe] + [f"  📊 Approx: *+{safe_odds:,}*", f""]
-    if cgp_balanced:
-        cgp_lines += [f"🟡 *BALANCED ({len(cgp_balanced)} legs)*"] + [_ls(l) for l in cgp_balanced] + [f"  📊 Approx: *+{bal_odds:,}*", f""]
-    if cgp_aggressive:
-        cgp_lines += [f"🔴 *AGGRESSIVE ({len(cgp_aggressive)} legs)*"] + [_ls(l) for l in cgp_aggressive] + [f"  📊 Approx: *+{agg_odds:,}*", f""]
-    if not cgp_all:
-        cgp_lines.append("_Not enough props today for a cross-game parlay_")
-    cgp_lines += [D, f"⚡ Each leg fits its own game script · Multi-game · Props only"]
+    ])
+    send(lock_msg, VIP_CHANNEL)
 
-    vip_msg = "\n".join(cgp_lines)
-    send(vip_msg, VIP_CHANNEL)
+    # ── Cross Game Parlay — handled by send_cgp() ─────────────────────────────
+    send_cgp(parlay_pool)
 
-    # ── Tag each leg's DB record ─────────────────────────────────────
-    _tag_parlay_legs_db(cgp_all, "CROSS_GAME_PARLAY")
-
-    # ── Save parlay legs for morning recap ───────────────────────────
-    _parlay_legs_saved = {
-        "cross_game": [{"desc": l["desc"], "game": l.get("game", ""), "bet_type": l.get("bet_type", "")} for l in cgp_all],
-    }
-    save_status(0, {"_last_parlay_legs": _parlay_legs_saved, "_last_parlay_date": today_str})
-
-    # ── Save CGP legs to DB for training (mirrors SGP) ───────────────
-    all_cgp_unique = {l["desc"]: l for l in cgp_safe + cgp_balanced + cgp_aggressive}
-    for leg in all_cgp_unique.values():
-        save_bet({
-            "game":          leg.get("game", ""),
-            "player":        leg.get("desc", ""),
-            "pick":          leg.get("desc", ""),
-            "betType":       leg.get("bet_type", "PROP"),
-            "pick_category": "CROSS_GAME_PARLAY",
-            "line":          None,
-            "prediction":    None,
-            "odds":          0,
-            "prob":          round(leg.get("confidence", 70) / 100, 4),
-            "edge":          round(leg.get("edge", 0), 2),
-            "confidence":    leg.get("confidence", 0),
-            "time":          str(datetime.now()),
-            "result":        None,
-        })
-
-    # ── Free channel — first 2 legs of SAFE tier only ────────────────
-    if cgp_safe:
-        teaser_legs  = cgp_safe[:2]
-        teaser_lines = "\n".join([f"  {l['desc']}" for l in teaser_legs])
-        n_more       = (len(cgp_safe) - 2) + len(cgp_balanced) + len(cgp_aggressive)
-        n_more       = max(n_more, 0)
-        free_msg = (
-            f"🌐 *FREE PLAY — CROSS GAME PARLAY*\n\n"
-            f"{teaser_lines}\n"
-            f"_...+{n_more} more legs in VIP (BALANCED + AGGRESSIVE tiers)_\n\n"
-            f"📊 Approx: *+{_parlay_odds(2):,}* (full parlay higher)\n\n"
-            f"🔒 VIP LOCK + full CGP system → VIP only\n"
-            f"👉 {CHECKOUT_URL}"
-        )
-        send(free_msg, FREE_CHANNEL)
-
-    # ── Save VIP lock to DB for learning ────────────────────────────
-    cgp_odds_val = _parlay_odds(len(cgp_all)) if cgp_all else 0
+    # ── Save VIP lock to DB for learning ──────────────────────────────────────
     _vl_game  = vip_lock.get("game", "")
     _vl_gdata = _games_data.get(_vl_game, {})
     save_bet({
@@ -12829,8 +12838,8 @@ def send_daily_system():
         "pick_category": "VIP_LOCK",
         "line":          None,
         "prediction":    None,
-        "odds":          cgp_odds_val,
-        "prob":          round(0.52 ** max(len(cgp_legs), 1), 4),
+        "odds":          0,
+        "prob":          0.52,
         "edge":          round(vip_lock.get("edge", 0), 2),
         "confidence":    vip_lock.get("confidence", 0),
         "time":          str(datetime.now()),
@@ -12843,10 +12852,7 @@ def send_daily_system():
     _system_sent_date = today_str
     save_status(0, {"_system_sent_date": today_str})
     save_memory_state()
-    print(
-        f"[System] Sent — LOCK: {vip_lock['desc']} | "
-        f"Cross Game Parlay: {len(cgp_legs)} legs"
-    )
+    print(f"[System] Sent — LOCK: {vip_lock['desc']}")
 
 
 # ==========================
@@ -13933,10 +13939,10 @@ def main():
                     except Exception as _adj_err:
                         print(f"[AutoAdjust] scheduler error: {_adj_err}")
 
-                # ── Per-game SGPs — fire after VIP LOCK is set OR when 8+ prop legs
-                #    are available (decoupled so SGP/CGP fire even on nights
-                #    where Edge-Fade 7 can't build an A/B slip) ──────────────
+                # ── CGP + Per-game SGPs — fire after VIP LOCK is set OR when 8+ prop
+                #    legs are available (decoupled so both fire even on slip-fail nights)
                 if _vip_lock_desc or len(_todays_parlay_legs) >= 8:
+                    send_cgp()   # has its own daily guard — safe to call every cycle
                     by_game = {}
                     for leg in _todays_parlay_legs:
                         g = leg.get("game", "")
