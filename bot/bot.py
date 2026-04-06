@@ -10675,7 +10675,7 @@ def run_full_system():
 
                     # ── Load learned thresholds once per player ──────────
                     _thr       = load_learning_data().get("script_thresholds") or _SCRIPT_THRESHOLD_DEFAULTS
-                    _min_gate  = min(_thr.get("prop_minutes_gate", _SCRIPT_THRESHOLD_DEFAULTS["prop_minutes_gate"]), 28)
+                    _min_gate  = min(_thr.get("prop_minutes_gate", _SCRIPT_THRESHOLD_DEFAULTS["prop_minutes_gate"]), 25)
                     _start_thr = _thr.get("prop_starter_mins", _SCRIPT_THRESHOLD_DEFAULTS["prop_starter_mins"])
                     _usg_gate  = _thr.get("prop_usage_gate",   _SCRIPT_THRESHOLD_DEFAULTS["prop_usage_gate"])
 
