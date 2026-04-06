@@ -8458,16 +8458,18 @@ def update_results():
                 WHERE result IS NULL
                   AND pick_category IN ('neutral_prop','fade_prop','benefactor_prop')
                   AND player IS NOT NULL AND player != ''
-                  AND COALESCE(bet_time, created_at) >= NOW() - INTERVAL '30 days'
                 ORDER BY id
             """)
             _db_prop_rows = _dp_cur.fetchall()
             _dp_cur.close()
 
+            print(f"[DB-PropSettle] query returned {len(_db_prop_rows)} unsettled prop rows")
             if _db_prop_rows:
                 # Collect unique dates across all unsettled bets so we can batch
                 # BDL API calls — one request per date, not one per bet row.
-                _bet_dates = sorted({str(r[7]) for r in _db_prop_rows if r[7]})
+                # Cap at 40 most-recent dates to avoid excess API calls.
+                _all_dates = sorted({str(r[7]) for r in _db_prop_rows if r[7]}, reverse=True)
+                _bet_dates = list(reversed(_all_dates[:40]))
                 print(f"[DB-PropSettle] {len(_db_prop_rows)} unsettled bets across {len(_bet_dates)} date(s)")
 
                 # Build date → {player_lower → stat_row} lookup for final games only
