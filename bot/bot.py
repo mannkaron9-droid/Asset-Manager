@@ -8626,15 +8626,17 @@ def update_results():
                             for _tm in _summ.get("boxscore", {}).get("players", []):
                                 for _sb_stat in _tm.get("statistics", []):
                                     _keys = _sb_stat.get("keys", [])
-                                    try:
-                                        _i_pts = _keys.index("PTS")
-                                        _i_reb = _keys.index("REB")
-                                        _i_ast = _keys.index("AST")
-                                        _i_3pt = _keys.index("3PT") if "3PT" in _keys else None
-                                    except ValueError:
+                                    # ESPN uses full words: "points", "rebounds", "assists"
+                                    # and "threePointFieldGoalsMade-threePointFieldGoalsAttempted"
+                                    _i_pts = next((i for i, k in enumerate(_keys) if k == "points"), None)
+                                    _i_reb = next((i for i, k in enumerate(_keys) if k == "rebounds"), None)
+                                    _i_ast = next((i for i, k in enumerate(_keys) if k == "assists"), None)
+                                    _i_3pt = next((i for i, k in enumerate(_keys) if "threePoint" in k and "Made" in k), None)
+                                    if _i_pts is None or _i_reb is None or _i_ast is None:
                                         continue
                                     for _ath in _sb_stat.get("athletes", []):
-                                        _aname  = _ath.get("athlete", {}).get("fullName", "").lower()
+                                        # ESPN uses displayName, not fullName
+                                        _aname = (_ath.get("athlete", {}).get("displayName") or "").lower()
                                         _astats = _ath.get("stats", [])
                                         if not _aname or not _astats:
                                             continue
