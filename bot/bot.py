@@ -6090,49 +6090,63 @@ def handle_commands():
                 elif text == "/dbstatus":
                     reply(chat_id, "❌ Admin only.")
                 elif text.startswith("/analyzedrop") and str(chat_id) == str(ADMIN_ID):
-                    _rng = text[len("/analyzedrop"):].strip()
+                    reply(chat_id, "🔍 Analyzing bets...")
                     try:
-                        _lo, _hi = (_rng.split("-") + ["256"])[:2] if "-" in _rng else ("185", _rng or "256")
-                        _lo, _hi = int(_lo), int(_hi)
-                    except Exception:
-                        _lo, _hi = 185, 256
-                    try:
+                        _arg = text[len("/analyzedrop"):].strip()
                         _aconn = _db_conn()
                         _acur  = _aconn.cursor()
+                        # Get total count first
+                        _acur.execute("SELECT COUNT(*), MIN(id), MAX(id) FROM bets")
+                        _total, _min_id, _max_id = _acur.fetchone()
+                        # Parse range — default to last 70 bets
+                        try:
+                            if "-" in _arg:
+                                _parts = _arg.split("-")
+                                _lo, _hi = int(_parts[0]), int(_parts[1])
+                            elif _arg.isdigit():
+                                _hi = _max_id
+                                _lo = _max_id - int(_arg)
+                            else:
+                                _hi = _max_id
+                                _lo = _max_id - 70
+                        except Exception:
+                            _hi = _max_id
+                            _lo = _max_id - 70
                         _acur.execute("""
-                            SELECT id, DATE(bet_time) as dt, bet_type, pick_category,
+                            SELECT id, DATE(bet_time), bet_type, pick_category,
                                    player, pick, line, odds, result, confidence
                             FROM bets WHERE id BETWEEN %s AND %s ORDER BY id ASC
                         """, (_lo, _hi))
                         _arows = _acur.fetchall()
                         _acur.close(); _aconn.close()
                         if not _arows:
-                            reply(chat_id, f"No bets found between #{_lo}–#{_hi}")
+                            reply(chat_id, f"No bets found (id {_lo}–{_hi}). Total bets: {_total}, ID range: {_min_id}–{_max_id}")
                         else:
-                            _wins = sum(1 for r in _arows if (r[8] or "").lower() == "win")
+                            _wins   = sum(1 for r in _arows if (r[8] or "").lower() == "win")
                             _losses = sum(1 for r in _arows if (r[8] or "").lower() == "loss")
-                            _voids  = sum(1 for r in _arows if (r[8] or "").lower() not in ("win","loss"))
+                            _voids  = len(_arows) - _wins - _losses
                             _by_type = {}
                             for r in _arows:
                                 _k = r[2] or r[3] or "unknown"
-                                _by_type.setdefault(_k, {"w":0,"l":0})
-                                if (r[8] or "").lower() == "win":   _by_type[_k]["w"] += 1
-                                if (r[8] or "").lower() == "loss":  _by_type[_k]["l"] += 1
-                            _lines = [
-                                f"📉 *Bets #{_lo}–#{_hi} Analysis*",
-                                f"Total: {len(_arows)} | ✅ {_wins}W · ❌ {_losses}L · ⏳ {_voids} void",
+                                _by_type.setdefault(_k, {"w": 0, "l": 0})
+                                if (r[8] or "").lower() == "win":  _by_type[_k]["w"] += 1
+                                if (r[8] or "").lower() == "loss": _by_type[_k]["l"] += 1
+                            _out = [
+                                f"📉 Bets #{_lo}-#{_hi} Analysis",
+                                f"Total: {len(_arows)} | {_wins}W / {_losses}L / {_voids} void",
                                 f"Win rate: {_wins/max(1,_wins+_losses)*100:.1f}%",
-                                "", "*By type:*"
+                                "", "By type:"
                             ]
                             for _k, _v in sorted(_by_type.items(), key=lambda x: -(x[1]["w"]+x[1]["l"])):
-                                _pct = _v["w"]/max(1,_v["w"]+_v["l"])*100
-                                _lines.append(f"  {_k}: {_v['w']}W·{_v['l']}L ({_pct:.0f}%)")
-                            _lines += ["", "*Last 20 settled:*"]
-                            _settled = [r for r in _arows if (r[8] or "").lower() in ("win","loss")][-20:]
+                                _pct = _v["w"] / max(1, _v["w"] + _v["l"]) * 100
+                                _out.append(f"  {_k}: {_v['w']}W/{_v['l']}L ({_pct:.0f}%)")
+                            _out += ["", "Last 15 settled:"]
+                            _settled = [r for r in _arows if (r[8] or "").lower() in ("win", "loss")][-15:]
                             for r in _settled:
                                 _ico = "✅" if (r[8] or "").lower() == "win" else "❌"
-                                _lines.append(f"  {_ico} #{r[0]} {r[4] or r[5] or ''} | {r[2] or r[3]} | conf={r[9]}")
-                            reply(chat_id, "\n".join(_lines), parse_mode="Markdown")
+                                _nm = (r[4] or r[5] or "")[:22]
+                                _out.append(f"  {_ico} #{r[0]} {_nm} | {r[2] or r[3] or ''}")
+                            reply(chat_id, "\n".join(_out))
                     except Exception as _ae:
                         reply(chat_id, f"❌ analyzedrop error: {_ae}")
                 elif text == "/todaypicks" and str(chat_id) == str(ADMIN_ID):
