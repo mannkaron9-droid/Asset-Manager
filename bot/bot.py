@@ -8608,6 +8608,53 @@ def update_results():
                     except Exception as _dbe:
                         print(f"[DB-PropSettle] BDL fetch error {_d}: {_dbe}")
 
+                # ── ESPN fallback: covers fringe/two-way players BDL doesn't track ──
+                # Fetches full box scores (all players, all games) for each date.
+                # Returns same {pts, reb, ast, fg3m} format as BDL lookup.
+                _espn_by_date: dict = {}
+                for _d in _bet_dates:
+                    _espn_by_date[_d] = {}
+                    try:
+                        _esp_date = _d.replace("-", "")  # "2026-04-02" → "20260402"
+                        _sb = _espn_get(f"{ESPN_BASE}/scoreboard?dates={_esp_date}")
+                        for _ev in _sb.get("events", []):
+                            _gid   = _ev.get("id", "")
+                            _gstat = _ev.get("status", {}).get("type", {}).get("description", "")
+                            if "final" not in _gstat.lower():
+                                continue
+                            _summ = _espn_get(f"{ESPN_BASE}/summary?event={_gid}")
+                            for _tm in _summ.get("boxscore", {}).get("players", []):
+                                for _sb_stat in _tm.get("statistics", []):
+                                    _keys = _sb_stat.get("keys", [])
+                                    try:
+                                        _i_pts = _keys.index("PTS")
+                                        _i_reb = _keys.index("REB")
+                                        _i_ast = _keys.index("AST")
+                                        _i_3pt = _keys.index("3PT") if "3PT" in _keys else None
+                                    except ValueError:
+                                        continue
+                                    for _ath in _sb_stat.get("athletes", []):
+                                        _aname  = _ath.get("athlete", {}).get("fullName", "").lower()
+                                        _astats = _ath.get("stats", [])
+                                        if not _aname or not _astats:
+                                            continue
+                                        try:
+                                            _fg3m = 0.0
+                                            if _i_3pt is not None and _i_3pt < len(_astats):
+                                                _v3 = str(_astats[_i_3pt])
+                                                _fg3m = float(_v3.split("-")[0]) if "-" in _v3 else float(_v3 or 0)
+                                            _espn_by_date[_d][_aname] = {
+                                                "pts":  float(_astats[_i_pts] if _i_pts < len(_astats) else 0),
+                                                "reb":  float(_astats[_i_reb] if _i_reb < len(_astats) else 0),
+                                                "ast":  float(_astats[_i_ast] if _i_ast < len(_astats) else 0),
+                                                "fg3m": _fg3m,
+                                            }
+                                        except Exception:
+                                            continue
+                        print(f"[DB-PropSettle] {_d}: {len(_espn_by_date[_d])} ESPN player rows")
+                    except Exception as _ee:
+                        print(f"[DB-PropSettle] ESPN fallback error {_d}: {_ee}")
+
                 _dp_upd = _db_prop_conn.cursor()
                 _STAT_BDL = {"points": "pts", "rebounds": "reb", "assists": "ast", "threes": "fg3m"}
 
@@ -8649,8 +8696,11 @@ def update_results():
 
                 for _row in _db_prop_rows:
                     _rid, _player, _pick_txt, _line, _btype, _pcat, _game, _bet_date = _row
-                    _day_lookup = _bdl_by_date.get(str(_bet_date), {})
-                    _stat_row   = _day_lookup.get((_player or "").lower())
+                    _pkey = (_player or "").strip().lower()
+                    # Try BDL first, then ESPN fallback for fringe/two-way players
+                    _stat_row = _bdl_by_date.get(str(_bet_date), {}).get(_pkey)
+                    if not _stat_row:
+                        _stat_row = _espn_by_date.get(str(_bet_date), {}).get(_pkey)
                     if not _stat_row:
                         continue
                     _rstat, _actual = _resolve_stat(_pick_txt, _line, _stat_row)
