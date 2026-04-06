@@ -321,10 +321,14 @@ def build_slip_from_props(
 
                 # Fade candidate: star + juiced line + primary stat for their role
                 FADEABLE_STATS = {
-                    "SCORER":     ["points", "player_points"],
-                    "PLAYMAKER":  ["assists", "player_assists"],
-                    "BIG":        ["rebounds", "player_rebounds", "total_rebounds"],
-                    "WING":       ["points", "player_points", "assists"],
+                    "go_to_scorer":   ["points", "player_points"],
+                    "combo_creator":  ["points", "player_points", "assists"],
+                    "sixth_man":      ["points", "player_points"],
+                    "floor_general":  ["assists", "player_assists"],
+                    "glass_cleaner":  ["rebounds", "player_rebounds", "total_rebounds"],
+                    "rim_anchor":     ["rebounds", "player_rebounds", "total_rebounds"],
+                    "spot_up_shooter": ["points", "player_points"],
+                    "utility_player": ["points", "player_points"],
                 }
                 fadeable = FADEABLE_STATS.get(role.role, ["points", "player_points"])
                 if (role.is_star
