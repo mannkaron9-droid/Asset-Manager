@@ -248,7 +248,13 @@ def build_slip_from_props(
                 if not stats:
                     continue
 
-                avg_mins  = float(stats.get("avg_mins", 28))
+                _raw_mins = stats.get("avg_mins")
+                if _raw_mins:
+                    avg_mins = float(_raw_mins)
+                elif float(stats.get("avg_pts") or 0) > 10:
+                    avg_mins = 22.0   # scoring player, likely rotation — conservative fallback
+                else:
+                    avg_mins = 0.0    # unknown/fringe player — reject
                 avg_usage = float(stats.get("avg_usage", 15))
 
                 if avg_mins < 20 or avg_usage < 8:   # 20 min gate
@@ -625,7 +631,13 @@ def get_top_candidates(
                 stats = get_player_stats_fn(player)
                 if not stats:
                     continue
-                avg_mins  = float(stats.get("avg_mins", 28))
+                _raw_mins = stats.get("avg_mins")
+                if _raw_mins:
+                    avg_mins = float(_raw_mins)
+                elif float(stats.get("avg_pts") or 0) > 10:
+                    avg_mins = 22.0   # scoring player, likely rotation — conservative fallback
+                else:
+                    avg_mins = 0.0    # unknown/fringe player — reject
                 avg_usage = float(stats.get("avg_usage", 15))
                 if avg_mins < 20 or avg_usage < 8:   # 20 min gate
                     continue
