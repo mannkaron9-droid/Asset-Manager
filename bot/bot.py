@@ -6105,10 +6105,10 @@ def handle_commands():
                     reply(chat_id, "❌ Admin only.")
                 elif text.startswith("/props ") and str(chat_id) == str(ADMIN_ID):
                     cmd_props(chat_id, text[7:].strip())
-                elif text.startswith("/sgp ") and str(chat_id) == str(ADMIN_ID):
-                    cmd_sgp(chat_id, text[5:].strip())
-                elif text.startswith("/parlay ") and str(chat_id) == str(ADMIN_ID):
-                    cmd_parlay(chat_id, text[8:].strip())
+                elif (text == "/sgp" or text.startswith("/sgp ")) and str(chat_id) == str(ADMIN_ID):
+                    cmd_sgp(chat_id, text[4:].strip())
+                elif (text == "/parlay" or text.startswith("/parlay ")) and str(chat_id) == str(ADMIN_ID):
+                    cmd_parlay(chat_id, text[7:].strip())
                 elif text.startswith("/feedpick") and str(chat_id) == str(ADMIN_ID):
                     print(f"[FeedPick] Received from {chat_id}: {text}")
                     raw_arg = text[9:].strip()
