@@ -6089,6 +6089,52 @@ def handle_commands():
                     cmd_dbstatus(chat_id)
                 elif text == "/dbstatus":
                     reply(chat_id, "❌ Admin only.")
+                elif text.startswith("/analyzedrop") and str(chat_id) == str(ADMIN_ID):
+                    _rng = text[len("/analyzedrop"):].strip()
+                    try:
+                        _lo, _hi = (_rng.split("-") + ["256"])[:2] if "-" in _rng else ("185", _rng or "256")
+                        _lo, _hi = int(_lo), int(_hi)
+                    except Exception:
+                        _lo, _hi = 185, 256
+                    try:
+                        _aconn = _db_connect()
+                        _acur  = _aconn.cursor()
+                        _acur.execute("""
+                            SELECT id, DATE(bet_time) as dt, bet_type, pick_category,
+                                   player, pick, line, odds, result, confidence
+                            FROM bets WHERE id BETWEEN %s AND %s ORDER BY id ASC
+                        """, (_lo, _hi))
+                        _arows = _acur.fetchall()
+                        _acur.close(); _aconn.close()
+                        if not _arows:
+                            reply(chat_id, f"No bets found between #{_lo}–#{_hi}")
+                        else:
+                            _wins = sum(1 for r in _arows if (r[8] or "").lower() == "win")
+                            _losses = sum(1 for r in _arows if (r[8] or "").lower() == "loss")
+                            _voids  = sum(1 for r in _arows if (r[8] or "").lower() not in ("win","loss"))
+                            _by_type = {}
+                            for r in _arows:
+                                _k = r[2] or r[3] or "unknown"
+                                _by_type.setdefault(_k, {"w":0,"l":0})
+                                if (r[8] or "").lower() == "win":   _by_type[_k]["w"] += 1
+                                if (r[8] or "").lower() == "loss":  _by_type[_k]["l"] += 1
+                            _lines = [
+                                f"📉 *Bets #{_lo}–#{_hi} Analysis*",
+                                f"Total: {len(_arows)} | ✅ {_wins}W · ❌ {_losses}L · ⏳ {_voids} void",
+                                f"Win rate: {_wins/max(1,_wins+_losses)*100:.1f}%",
+                                "", "*By type:*"
+                            ]
+                            for _k, _v in sorted(_by_type.items(), key=lambda x: -(x[1]["w"]+x[1]["l"])):
+                                _pct = _v["w"]/max(1,_v["w"]+_v["l"])*100
+                                _lines.append(f"  {_k}: {_v['w']}W·{_v['l']}L ({_pct:.0f}%)")
+                            _lines += ["", "*Last 20 settled:*"]
+                            _settled = [r for r in _arows if (r[8] or "").lower() in ("win","loss")][-20:]
+                            for r in _settled:
+                                _ico = "✅" if (r[8] or "").lower() == "win" else "❌"
+                                _lines.append(f"  {_ico} #{r[0]} {r[4] or r[5] or ''} | {r[2] or r[3]} | conf={r[9]}")
+                            reply(chat_id, "\n".join(_lines), parse_mode="Markdown")
+                    except Exception as _ae:
+                        reply(chat_id, f"❌ analyzedrop error: {_ae}")
                 elif text == "/todaypicks" and str(chat_id) == str(ADMIN_ID):
                     cmd_today_picks(chat_id)
                 elif text == "/todaypicks":
