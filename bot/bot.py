@@ -13119,14 +13119,15 @@ def _fire_prop_wave():
             if g:
                 by_game.setdefault(g, []).append(leg)
         for game_name, game_legs in by_game.items():
-            try:
-                send_elite_player_props(game_name, game_legs)
-            except Exception as _ep_err:
-                print(f"[PropWave] EliteProps error {game_name}: {_ep_err}")
-            try:
-                send_sgp_for_game(game_name, game_legs)
-            except Exception as _sgp_err:
-                print(f"[PropWave] SGP error {game_name}: {_sgp_err}")
+            if len(game_legs) >= 2:
+                try:
+                    send_elite_player_props(game_name, game_legs)
+                except Exception as _ep_err:
+                    print(f"[PropWave] EliteProps error {game_name}: {_ep_err}")
+                try:
+                    send_sgp_for_game(game_name, game_legs)
+                except Exception as _sgp_err:
+                    print(f"[PropWave] SGP error {game_name}: {_sgp_err}")
     except Exception as _by_err:
         print(f"[PropWave] per-game send error: {_by_err}")
 
@@ -14325,23 +14326,13 @@ def send_sgp_for_game(game_name, game_legs):
         "points": "🏀", "rebounds": "💪", "assists": "🔥", "threes": "🎯",
     }
 
-    # ── Filter out VIP LOCK and game-level bets — SGP prefers player props ──
+    # ── Filter out VIP LOCK and game-level bets — SGP uses player props only ──
     _SGP_EXCLUDE_TYPES = {"TOTAL", "SPREAD", "MONEYLINE", "ML", "OVER", "UNDER"}
     pool = [
         l for l in game_legs
         if l.get("desc") != _vip_lock_desc
         and (l.get("bet_type") or l.get("betType") or "").upper() not in _SGP_EXCLUDE_TYPES
     ]
-    # When props are thin, supplement with the game's spread/total so every
-    # game always gets an SGP (minimum 2 legs required for a parlay).
-    if len(pool) < 2:
-        _game_lines = [
-            l for l in game_legs
-            if (l.get("bet_type") or l.get("betType") or "").upper() in _SGP_EXCLUDE_TYPES
-            and l.get("desc") != _vip_lock_desc
-        ]
-        needed = 2 - len(pool)
-        pool = pool + _game_lines[:needed]
     if len(pool) < 2:
         return
 
