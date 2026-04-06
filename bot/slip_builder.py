@@ -144,6 +144,7 @@ def build_slip_from_props(
     shadow_hit_rates: dict = None, # {"{player}:{stat}": {"rate": 0.xx, "total": n}} from learning
     win_rate_context: dict = None, # all historical win-rate learning from settled bets
     conf_multipliers: dict = None, # {category: multiplier} from nightly learning
+    players_bet_today: set = None, # player names already bet today — skip to prevent re-picks
 ) -> tuple:
     """
     Main entry point for the Edge-Fade 7 slip builder.
@@ -155,6 +156,7 @@ def build_slip_from_props(
     injuries           = injuries or {}
     injury_boost       = injury_boost or {}
     back_to_back_teams = back_to_back_teams or set()
+    _already_bet_today = {p.strip().lower() for p in (players_bet_today or set())}
 
     # ── Step A: Group props by game ───────────────────────────────────────────
     by_game = {}
@@ -237,6 +239,12 @@ def build_slip_from_props(
 
         for player in seen_order[:10]:
             try:
+                # Skip players already picked today — prevents hammering the same
+                # player across multiple bot cycles on the same night
+                if player.strip().lower() in _already_bet_today:
+                    print(f"  [SlipBuilder] Skip {player} — already in today's picks")
+                    continue
+
                 # Skip injured players
                 inj = injuries.get(player.lower(), {})
                 if inj.get("status") in ("Out", "Doubtful"):
