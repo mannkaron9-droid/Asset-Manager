@@ -2193,6 +2193,26 @@ def _pe_save(conn):
         print(f"[PatternEngine] save error: {e}")
 
 
+def pe_flush():
+    """
+    Immediately persist pattern DB + causality hit rates to DB.
+    Opens its own connection — safe to call anywhere after bet settlement
+    without needing to pass a connection.  This prevents losing intraday
+    causality + pattern signal on a restart before the nightly cycle runs.
+    """
+    try:
+        import os as _osf, psycopg2 as _pgf
+        _url = _osf.environ.get("DATABASE_URL", "")
+        if not _url:
+            return
+        _c = _pgf.connect(_url)
+        _pe_save(_c)
+        _c.close()
+        print("[PatternEngine] pe_flush: pattern + causality saved to DB")
+    except Exception as _fe:
+        print(f"[PatternEngine] pe_flush error (non-fatal): {_fe}")
+
+
 def _pe_load(conn):
     """Load all pattern data + pipeline self-learning state from learning_data table."""
     global _pattern_db, _meta_db, _exposure_tracker, _conflict_db, _pattern_adjustments
