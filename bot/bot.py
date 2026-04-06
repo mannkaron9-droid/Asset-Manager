@@ -2208,6 +2208,39 @@ def cmd_forcesettle(chat_id):
     fade_prop / benefactor_prop legs from SGP/CGP that auto-settle misses.
     """
     reply(chat_id, "⚙️ Running settlement pass now...")
+
+    # Quick DB diagnostic before running — no BDL call needed
+    diag_lines = []
+    try:
+        _dc = _db_conn()
+        if _dc:
+            _dcur = _dc.cursor()
+            _dcur.execute("""
+                SELECT COUNT(*),
+                       COUNT(*) FILTER (WHERE player IS NULL OR player = ''),
+                       COUNT(*) FILTER (WHERE result IS NOT NULL)
+                FROM bets
+                WHERE pick_category IN ('neutral_prop','fade_prop','benefactor_prop')
+            """)
+            _tot, _empty_player, _already_settled = _dcur.fetchone()
+            _dcur.execute("""
+                SELECT player, pick, line,
+                       DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York')
+                FROM bets
+                WHERE pick_category IN ('neutral_prop','fade_prop','benefactor_prop')
+                  AND result IS NULL
+                  AND player IS NOT NULL AND player != ''
+                ORDER BY id LIMIT 3
+            """)
+            _sample = _dcur.fetchall()
+            _dcur.close()
+            _dc.close()
+            diag_lines.append(f"📊 DB: {_tot} prop rows | {_already_settled} settled | {_empty_player} empty player")
+            for _sp, _sk, _sl, _sd in _sample:
+                diag_lines.append(f"  • {_sp} | {_sk} | line={_sl} | {_sd}")
+    except Exception as _de:
+        diag_lines.append(f"⚠️ DB diag error: {_de}")
+
     try:
         n = update_results()
         try:
@@ -2215,9 +2248,12 @@ def cmd_forcesettle(chat_id):
             pe_flush()
         except Exception:
             pass
-        reply(chat_id, f"✅ Settlement complete — {n or 0} pick(s) newly graded.")
+        msg = f"✅ Settlement complete — {n or 0} pick(s) newly graded."
+        if diag_lines:
+            msg += "\n\n" + "\n".join(diag_lines)
+        reply(chat_id, msg)
     except Exception as e:
-        reply(chat_id, f"❌ Settlement error: {e}")
+        reply(chat_id, f"❌ Settlement error: {e}\n" + "\n".join(diag_lines))
         print(f"[ForceSettle] error: {e}")
 
 
