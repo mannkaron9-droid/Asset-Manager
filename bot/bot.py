@@ -8590,13 +8590,21 @@ def update_results():
                 for _d in _bet_dates:
                     _bdl_by_date[_d] = {}
                     try:
-                        _url = f"{BDL_BASE}/stats?dates[]={_d}&per_page=100"
-                        for _st in _bdl_get(_url).get("data", []):
-                            _p = _st.get("player", {})
-                            _nm = f"{_p.get('first_name','')} {_p.get('last_name','')}".strip().lower()
-                            if "final" in (_st.get("game", {}).get("status", "")).lower():
-                                _bdl_by_date[_d][_nm] = _st
-                        print(f"[DB-PropSettle] {_d}: {len(_bdl_by_date[_d])} final player rows from BDL")
+                        # Paginate through all BDL pages for this date so late-game
+                        # teams (pages 2-3) are included — not just the first 100.
+                        _page, _max_pages = 1, 1
+                        while _page <= _max_pages and _page <= 5:
+                            _url = f"{BDL_BASE}/stats?dates[]={_d}&per_page=100&page={_page}"
+                            _resp = _bdl_get(_url)
+                            _meta = _resp.get("meta", {})
+                            _max_pages = int(_meta.get("total_pages") or 1)
+                            for _st in _resp.get("data", []):
+                                _p = _st.get("player", {})
+                                _nm = f"{_p.get('first_name','')} {_p.get('last_name','')}".strip().lower()
+                                if "final" in (_st.get("game", {}).get("status", "")).lower():
+                                    _bdl_by_date[_d][_nm] = _st
+                            _page += 1
+                        print(f"[DB-PropSettle] {_d}: {len(_bdl_by_date[_d])} final player rows from BDL ({_max_pages} page(s))")
                     except Exception as _dbe:
                         print(f"[DB-PropSettle] BDL fetch error {_d}: {_dbe}")
 
