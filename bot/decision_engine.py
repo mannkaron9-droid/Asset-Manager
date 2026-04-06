@@ -1899,7 +1899,9 @@ def exposure_penalty(key: tuple) -> float:
     k     = _pk(key)
     exp   = _exposure_tracker.get(k, 0)
     total = sum(_exposure_tracker.values()) + 1
-    return -(exp / total)
+    # Cap at -0.15 — prevents accumulated exposure from dragging high-confidence
+    # picks below the LEAN gate and silently blocking them from being saved.
+    return max(-0.15, -(exp / total))
 
 
 # ─── 6. Conflict detection ────────────────────────────────────────────────────
