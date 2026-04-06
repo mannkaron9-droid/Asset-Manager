@@ -4533,6 +4533,12 @@ def _generate_shadow_picks(game_id, home_team, away_team, game_date):
                   "assists": "pred_ast", "threes":   "pred_fg3"}
     _STAT_HIST = {"points": "pts",      "rebounds": "reb",
                   "assists": "ast",     "threes":   "fg3"}
+    # Combo props: map prop_type → tuple of pred_keys to sum
+    _COMBO_PRED = {
+        "points_rebounds_assists": ("pred_pts", "pred_reb", "pred_ast"),
+        "points_rebounds":         ("pred_pts", "pred_reb"),
+        "points_assists":          ("pred_pts", "pred_ast"),
+    }
     _ROLE_MISMATCH = {
         "go_to_scorer":    ["rebounds"],
         "floor_general":   ["rebounds"],
@@ -4810,6 +4816,101 @@ def _generate_shadow_picks(game_id, home_team, away_team, game_date):
                     passed += 1
             except Exception as e:
                 print(f"[Shadow] prop insert error {pname}/{prop_type}: {e}")
+
+        # ── Combo props (PRA, PR, PA) — summed prediction vs combined line ────
+        for combo_type, pred_keys in _COMBO_PRED.items():
+            try:
+                combo_pred = sum(float(stats.get(pk) or 0) for pk in pred_keys)
+                if combo_pred < 2.0:
+                    continue
+                combo_entries = [x for x in player_lines if x.get("prop_type") == combo_type]
+                if not combo_entries:
+                    continue
+                real_line = float(combo_entries[0].get("line", 0))
+                real_odds = float(combo_entries[0].get("odds", -110))
+                if real_line <= 0:
+                    continue
+                edge     = combo_pred - real_line
+                pick_dir = "over" if edge >= 0 else "under"
+                base_conf = calculate_confidence(
+                    edge, _PROP_STD.get(combo_type, 8.0),
+                    history=[], line=real_line, direction=pick_dir.upper()
+                )
+                confidence = calibrated_confidence("points", base_conf)
+                blocked_by = None
+                if not is_elite_pick(edge, confidence, prop_type="points"):
+                    blocked_by = "L0_NO_EDGE_OR_CONF"
+                final_conf = round(min(99, max(40, confidence * mult)), 1)
+                combo_label = combo_type.replace("_", "+").upper()
+                pick_text = (
+                    f"🎯 *{pname}* — {pick_dir.upper()} {real_line} {combo_label}"
+                    f" [{'BLOCKED:' + blocked_by if blocked_by else 'PASS'}]\n"
+                    f"  Combo pred: {combo_pred:.1f} · Edge: {edge:+.1f} · Conf: {final_conf:.0f}%"
+                )
+                try:
+                    cur.execute("""
+                        INSERT INTO shadow_picks
+                            (game_id, game_date, home_team, away_team,
+                             pick_type, player_name, stat, line,
+                             direction, confidence, edge_score,
+                             prob, implied_prob,
+                             game_script, pick_text, blocked_by, role_tag, created_at)
+                        VALUES (%s,%s,%s,%s,'prop',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                        ON CONFLICT (game_id, pick_type, player_name, stat) DO UPDATE
+                            SET blocked_by   = EXCLUDED.blocked_by,
+                                confidence   = EXCLUDED.confidence,
+                                edge_score   = EXCLUDED.edge_score,
+                                pick_text    = EXCLUDED.pick_text
+                    """, (game_id, game_date, home_team, away_team,
+                          pname, combo_type, real_line, pick_dir,
+                          final_conf, edge, gs_label,
+                          min(1.0, combo_pred / max(real_line, 1)),
+                          0.5, pick_text, blocked_by, role_tag or None))
+                    picks_stored += 1
+                    if blocked_by:
+                        blocked += 1
+                    else:
+                        passed += 1
+                except Exception as _ce:
+                    print(f"[Shadow] combo insert error {pname}/{combo_type}: {_ce}")
+            except Exception as _cx:
+                print(f"[Shadow] combo score error {pname}/{combo_type}: {_cx}")
+
+        # ── First basket — value based on implied probability vs role ──────────
+        try:
+            fb_entries = [x for x in player_lines if x.get("prop_type") == "first_basket"]
+            if fb_entries and role_tag in ("go_to_scorer", "combo_creator", "sixth_man"):
+                fb_odds    = float(fb_entries[0].get("odds", 0))
+                fb_implied = implied_prob(fb_odds) if fb_odds != 0 else 0
+                # Value play if odds > +400 (implied < ~20%) and player is primary scorer
+                if fb_odds >= 400 and fb_implied < 0.20:
+                    fb_conf = round(min(72, max(55, (0.20 - fb_implied) * 400 + 55)), 1)
+                    fb_text = (
+                        f"🥇 *{pname}* FIRST BASKET [PASS]\n"
+                        f"  Odds: +{int(fb_odds)} · Implied: {fb_implied:.1%} · Conf: {fb_conf:.0f}%"
+                    )
+                    try:
+                        cur.execute("""
+                            INSERT INTO shadow_picks
+                                (game_id, game_date, home_team, away_team,
+                                 pick_type, player_name, stat, line,
+                                 direction, confidence, edge_score,
+                                 prob, implied_prob,
+                                 game_script, pick_text, blocked_by, role_tag, created_at)
+                            VALUES (%s,%s,%s,%s,'prop',%s,'first_basket',%s,'over',%s,%s,%s,%s,%s,%s,%s,NULL,%s,NOW())
+                            ON CONFLICT (game_id, pick_type, player_name, stat) DO UPDATE
+                                SET confidence   = EXCLUDED.confidence,
+                                    pick_text    = EXCLUDED.pick_text
+                        """, (game_id, game_date, home_team, away_team,
+                              pname, fb_odds, fb_conf,
+                              0.0, 0.20 - fb_implied,
+                              gs_label, fb_text, 0.20, role_tag or None))
+                        picks_stored += 1
+                        passed += 1
+                    except Exception as _fbe:
+                        print(f"[Shadow] first_basket insert error {pname}: {_fbe}")
+        except Exception as _fbx:
+            print(f"[Shadow] first_basket score error {pname}: {_fbx}")
 
     # ── Game total shadow pick ────────────────────────────────────────────────
     _defensive_scripts = ("HALFCOURT", "HALFCOURT_DEFENSIVE_BATTLE", "SLOW_PACED_DEFENSIVE_BATTLE")
@@ -7623,7 +7724,11 @@ def get_player_props(force=False):
         print(f"[Props] {len(todays_events)} games in 12-h window (of {len(events)} total)")
 
         all_games = []
-        markets = "player_points,player_rebounds,player_assists,player_threes"
+        markets = (
+            "player_points,player_rebounds,player_assists,player_threes,"
+            "player_points_rebounds_assists,player_points_rebounds,"
+            "player_points_assists,player_first_basket"
+        )
         for event in todays_events:
             try:
                 url = (
@@ -7658,7 +7763,11 @@ def get_player_props(force=False):
 
 
 def extract_props(data):
-    PROP_MARKETS = {"player_points", "player_rebounds", "player_assists", "player_threes"}
+    PROP_MARKETS = {
+        "player_points", "player_rebounds", "player_assists", "player_threes",
+        "player_points_rebounds_assists", "player_points_rebounds",
+        "player_points_assists", "player_first_basket",
+    }
     props = []
     seen = set()
 
@@ -7672,23 +7781,44 @@ def extract_props(data):
             for market in book.get("markets", []):
                 if market["key"] not in PROP_MARKETS:
                     continue
-                prop_type = market["key"].replace("player_", "")  # points/rebounds/assists/threes
-                for outcome in market.get("outcomes", []):
-                    if outcome.get("name") != "Over":
-                        continue
-                    player = outcome.get("description", "")
-                    line = outcome.get("point", 0)
-                    key = (player, prop_type)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    props.append({
-                        "player":    player,
-                        "line":      line,
-                        "odds":      outcome.get("price", -110),
-                        "prop_type": prop_type,
-                        "game":      matchup,
-                    })
+                prop_type = market["key"].replace("player_", "")
+
+                if prop_type == "first_basket":
+                    # First basket: outcome name IS the player, no line
+                    for outcome in market.get("outcomes", []):
+                        player = outcome.get("name", "")
+                        odds   = outcome.get("price", 0)
+                        if not player or odds == 0:
+                            continue
+                        key = (player, "first_basket")
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        props.append({
+                            "player":    player,
+                            "line":      None,
+                            "odds":      odds,
+                            "prop_type": "first_basket",
+                            "game":      matchup,
+                        })
+                else:
+                    # Standard and combo over/under markets
+                    for outcome in market.get("outcomes", []):
+                        if outcome.get("name") != "Over":
+                            continue
+                        player = outcome.get("description", "")
+                        line   = outcome.get("point", 0)
+                        key    = (player, prop_type)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        props.append({
+                            "player":    player,
+                            "line":      line,
+                            "odds":      outcome.get("price", -110),
+                            "prop_type": prop_type,
+                            "game":      matchup,
+                        })
     return props
 
 
@@ -7858,12 +7988,16 @@ def _norm_sf(x, loc, scale):
 _NBA_TOTAL_STD  = 12.5   # NBA game total points std dev
 _NBA_SPREAD_STD = 10.5   # NBA margin-of-victory std dev
 _PROP_STD = {
-    "points":   7.0,
-    "rebounds": 3.0,
-    "assists":  2.5,
-    "threes":   1.5,
-    "steals":   1.2,
-    "blocks":   1.0,
+    "points":                    7.0,
+    "rebounds":                  3.0,
+    "assists":                   2.5,
+    "threes":                    1.5,
+    "steals":                    1.2,
+    "blocks":                    1.0,
+    "points_rebounds_assists":   9.0,
+    "points_rebounds":           8.0,
+    "points_assists":            8.0,
+    "first_basket":              3.0,
 }
 
 
@@ -11113,14 +11247,27 @@ def run_full_system():
             "assists":  "pred_ast",
             "threes":   "pred_fg3",
         }
+        COMBO_PRED_KEYS = {
+            "points_rebounds_assists": ("pred_pts", "pred_reb", "pred_ast"),
+            "points_rebounds":         ("pred_pts", "pred_reb"),
+            "points_assists":          ("pred_pts", "pred_ast"),
+        }
         EMOJI = {
-            "points":   "🏀",
-            "rebounds": "💪",
-            "assists":  "🔥",
-            "threes":   "🎯",
+            "points":                    "🏀",
+            "rebounds":                  "💪",
+            "assists":                   "🔥",
+            "threes":                    "🎯",
+            "points_rebounds_assists":   "🎯",
+            "points_rebounds":           "🎯",
+            "points_assists":            "🎯",
+            "first_basket":              "🥇",
         }
 
-        UNIT = {"points": "pts", "rebounds": "reb", "assists": "ast", "threes": "3s"}
+        UNIT = {
+            "points": "pts", "rebounds": "reb", "assists": "ast", "threes": "3s",
+            "points_rebounds_assists": "PRA", "points_rebounds": "PR",
+            "points_assists": "PA", "first_basket": "1st basket",
+        }
 
         # Get injuries once for health dots
         try:
@@ -11201,11 +11348,41 @@ def run_full_system():
                         "threes":   _safe_round(stats.get("pred_fg3")),
                     }
 
+                    # Extend pred dict with combo values for quick lookup
+                    pred["points_rebounds_assists"] = round(
+                        pred["points"] + pred["rebounds"] + pred["assists"], 1)
+                    pred["points_rebounds"] = round(pred["points"] + pred["rebounds"], 1)
+                    pred["points_assists"]  = round(pred["points"] + pred["assists"], 1)
+
                     # Elite pick detection
                     elite_picks = []
                     for prop in pprops:
                         prop_type = prop.get("prop_type", "points")
                         line = prop.get("line")
+
+                        # ── First basket: no line, handled separately ─────────
+                        if prop_type == "first_basket":
+                            fb_odds = float(prop.get("odds", 0))
+                            fb_impl = implied_prob(fb_odds) if fb_odds > 0 else 1.0
+                            if fb_odds >= 400 and fb_impl < 0.20:
+                                fb_conf = round(min(72, max(55, (0.20 - fb_impl) * 400 + 55)), 1)
+                                elite_picks.append({
+                                    "emoji":      "🥇",
+                                    "pick_side":  "SCORER",
+                                    "line":       fb_odds,
+                                    "prediction": 0,
+                                    "prop_type":  "first_basket",
+                                    "confidence": fb_conf,
+                                    "edge":       round(0.20 - fb_impl, 3),
+                                    "odds":       fb_odds,
+                                    "unit":       "1st basket",
+                                    "dot":        dot,
+                                    "is_starter": is_starter,
+                                    "mismatch":   "",
+                                    "desc": f"🥇 {player} FIRST BASKET SCORER +{int(fb_odds)} — {fb_conf:.0f}%",
+                                })
+                            continue
+
                         if not line:
                             continue
                         # ── Hard block: -400 wall ─────────────────────────────
@@ -11213,14 +11390,25 @@ def run_full_system():
                         if _raw_odds <= -400:
                             print(f"  [HardBlock] {player} {prop_type} {_raw_odds} — beyond -400 wall, skipped")
                             continue
-                        prediction = float(stats.get(PRED_KEY.get(prop_type, "pred_pts")) or 0)
+
+                        # ── Prediction: sum for combo props, single for standard ──
+                        if prop_type in COMBO_PRED_KEYS:
+                            prediction = round(sum(
+                                float(stats.get(pk) or 0)
+                                for pk in COMBO_PRED_KEYS[prop_type]
+                            ), 1)
+                        else:
+                            prediction = float(stats.get(PRED_KEY.get(prop_type, "pred_pts")) or 0)
+
                         edge       = prediction - float(line)
                         pick_side  = "OVER" if edge > 0 else "UNDER"
-                        stat_vals  = [x for x in ({"points": stats.get("pts", []),
-                                      "rebounds": stats.get("reb", []),
-                                      "assists":  stats.get("ast", []),
-                                      "threes":   stats.get("fg3", [])
-                                      }.get(prop_type) or []) if x is not None]
+                        _stat_hist_map = {
+                            "points":   stats.get("pts", []),
+                            "rebounds": stats.get("reb", []),
+                            "assists":  stats.get("ast", []),
+                            "threes":   stats.get("fg3", []),
+                        }
+                        stat_vals  = [x for x in (_stat_hist_map.get(prop_type) or []) if x is not None]
                         variance   = float(np.std(stat_vals[:5])) if len(stat_vals) >= 2 else 3.0
                         confidence = calibrated_confidence(
                             prop_type,
