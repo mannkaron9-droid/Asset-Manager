@@ -13933,8 +13933,10 @@ def main():
                     except Exception as _adj_err:
                         print(f"[AutoAdjust] scheduler error: {_adj_err}")
 
-                # ── Per-game SGPs — fire throughout the day after VIP LOCK is set ──
-                if _vip_lock_desc:
+                # ── Per-game SGPs — fire after VIP LOCK is set OR when 8+ prop legs
+                #    are available (decoupled so SGP/CGP fire even on nights
+                #    where Edge-Fade 7 can't build an A/B slip) ──────────────
+                if _vip_lock_desc or len(_todays_parlay_legs) >= 8:
                     by_game = {}
                     for leg in _todays_parlay_legs:
                         g = leg.get("game", "")
