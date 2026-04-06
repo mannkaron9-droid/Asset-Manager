@@ -2284,7 +2284,10 @@ def cmd_debugsettle(chat_id):
     except Exception as e:
         lines.append(f"❌ DB error: {e}")
 
-    reply(chat_id, "\n".join(lines), parse_mode="HTML")
+    try:
+        reply(chat_id, "\n".join(lines), parse_mode="HTML")
+    except Exception:
+        reply(chat_id, "\n".join(lines))
 
 
 def cmd_settle(chat_id, raw):
@@ -6076,9 +6079,9 @@ def handle_commands():
                     cmd_forcesettle(chat_id)
                 elif text == "/forcesettle" and str(chat_id) != str(ADMIN_ID):
                     reply(chat_id, "❌ Admin only.")
-                elif text == "/debugsettle" and str(chat_id) == str(ADMIN_ID):
+                elif text.startswith("/debugsettle") and str(chat_id) == str(ADMIN_ID):
                     cmd_debugsettle(chat_id)
-                elif text == "/debugsettle" and str(chat_id) != str(ADMIN_ID):
+                elif text.startswith("/debugsettle") and str(chat_id) != str(ADMIN_ID):
                     reply(chat_id, "❌ Admin only.")
                 elif text.startswith("/settle") and str(chat_id) == str(ADMIN_ID):
                     raw_arg = text[7:].strip()
