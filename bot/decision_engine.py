@@ -1259,12 +1259,15 @@ def run_full_pipeline(
         print(f"  {tag} L6 BLOCK: pattern score {l6_adj:.3f} — historical evidence against")
         return None
 
-    # Shadow hit rate learning
+    # Shadow hit rate learning — edge bonus for 5-9 samples.
+    # Players with 10+ samples get a full EV override at L7 instead;
+    # applying sh_bonus here too would double-count the signal.
     sh_bonus = 0.0
     if shadow_hit_rates:
         sh_key  = f"{player.lower()}:{stat.lower()}"
         sh_data = shadow_hit_rates.get(sh_key)
-        if sh_data and sh_data.get("total", 0) >= 5:
+        sh_total = sh_data.get("total", 0) if sh_data else 0
+        if sh_data and 5 <= sh_total < 10:
             sh_rate = sh_data["rate"]
             if sh_rate >= 0.65:   sh_bonus =  0.05
             elif sh_rate >= 0.55: sh_bonus =  0.02
@@ -2622,8 +2625,6 @@ def update_role_threshold(role: str, field: str, hit: bool):
     elif hit_rate <= 0.40:
         entry["delta"] = min(entry["delta"] + 0.1,  3.0)
 
-
-_DEFAULT_ROLE_MULT = {r: 1.0 for r in _ALL_ROLES}
 
 _DEFAULT_ROLE_MULT = {r: 1.0 for r in _ALL_ROLES}
 
