@@ -13954,10 +13954,16 @@ def send_elite_player_props(game_name, game_legs):
             lines.append(f"🏀 {pts} pts · 💪 {reb} reb · 🔥 {ast} ast · 🎯 {fg3m} 3s")
         return lines
 
-    # ── Elite picks — top 5 by confidence, no duplicates ─────────────
+    # ── Elite Game Lines — game-level bets only (totals, spreads, moneylines) ──
+    _GAME_LEVEL_TYPES = {"TOTAL", "SPREAD", "MONEYLINE", "ML", "OVER", "UNDER"}
+    game_level_legs = [
+        l for l in game_legs
+        if (l.get("bet_type") or l.get("betType") or "").upper() in _GAME_LEVEL_TYPES
+    ]
+
     seen_picks = set()
     top_picks  = []
-    for leg in sorted(game_legs, key=lambda x: x.get("confidence", 0), reverse=True):
+    for leg in sorted(game_level_legs, key=lambda x: x.get("confidence", 0), reverse=True):
         desc = leg.get("desc", "")
         if desc and desc not in seen_picks:
             top_picks.append(leg)
@@ -13979,7 +13985,7 @@ def send_elite_player_props(game_name, game_legs):
     home_block = _player_block(home_starters)
 
     msg_parts = [
-        f"🏀 *ELITE PLAYER PROPS*",
+        f"📊 *ELITE GAME LINES*",
         f"_{game_name}_",
         f"",
         f"━━━ {away_team.upper()} ━━━",
@@ -13988,7 +13994,7 @@ def send_elite_player_props(game_name, game_legs):
         f"━━━ {home_team.upper()} ━━━",
         *(home_block or ["  _No data yet_"]),
         f"",
-        f"━━━ 🎯 ELITE PICKS ━━━",
+        f"━━━ 🎯 GAME LINES ━━━",
         *pick_lines,
         f"",
         D,
@@ -13997,7 +14003,7 @@ def send_elite_player_props(game_name, game_legs):
 
     send("\n".join(msg_parts), VIP_CHANNEL)
     _elite_props_sent_games.add(game_name)
-    print(f"[EliteProps] Sent for {game_name} — {len(pick_lines)} picks")
+    print(f"[EliteGameLines] Sent for {game_name} — {len(pick_lines)} game lines")
 
 
 def send_sgp_for_game(game_name, game_legs):
@@ -14018,8 +14024,13 @@ def send_sgp_for_game(game_name, game_legs):
         "points": "🏀", "rebounds": "💪", "assists": "🔥", "threes": "🎯",
     }
 
-    # ── Filter out VIP LOCK ─────────────────────────────────────────
-    pool = [l for l in game_legs if l.get("desc") != _vip_lock_desc]
+    # ── Filter out VIP LOCK and game-level bets — SGP uses player props only ──
+    _SGP_EXCLUDE_TYPES = {"TOTAL", "SPREAD", "MONEYLINE", "ML", "OVER", "UNDER"}
+    pool = [
+        l for l in game_legs
+        if l.get("desc") != _vip_lock_desc
+        and (l.get("bet_type") or l.get("betType") or "").upper() not in _SGP_EXCLUDE_TYPES
+    ]
     if len(pool) < 2:
         return
 
