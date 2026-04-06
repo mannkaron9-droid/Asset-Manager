@@ -1,0 +1,12 @@
+{
+  "note": "Use this file as reference when setting up the API Server service on Railway.",
+  "service": "API Server",
+  "buildCommand": "npm install -g pnpm && pnpm install && pnpm --filter @workspace/api-server run build",
+  "startCommand": "node artifacts/api-server/dist/index.cjs",
+  "requiredEnvVars": [
+    "PORT",
+    "DATABASE_URL",
+    "STRIPE_SECRET_KEY",
+    "STRIPE_PRICE_ID"
+  ]
+}
