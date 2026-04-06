@@ -68,7 +68,7 @@ LINE_TRAP_DIFF  =  1.0   # line 1.0+ ABOVE avg → trap line (BAD)
 
 # ── Monte Carlo slip optimizer ────────────────────────────────────────────────
 MONTE_CARLO_ATTEMPTS = 50          # shuffle attempts per target size
-SLIP_TARGET_SIZES    = [3, 5, 7]   # build at each size, keep highest-EV winner
+SLIP_TARGET_SIZES    = [3, 4, 5, 6, 7]   # build at each size, keep highest-EV winner
 
 # ── Minutes threshold ─────────────────────────────────────────────────────────
 MIN_MINUTES = 20          # players averaging < 20 min/game are not valid legs
