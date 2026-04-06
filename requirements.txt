@@ -1,0 +1,8 @@
+flask
+gunicorn
+requests
+numpy
+scikit-learn
+pandas
+stripe
+psycopg2-binary
