@@ -3823,11 +3823,7 @@ def _watch_all_live_games():
                 try:
                     from decision_engine import get_context_tracker
                     _pre_script = _get_predicted_script(home_team, away_team)
-                    _ct = get_context_tracker(
-                        game_id, home_team, away_team,
-                        initial_script=_pre_script or "",
-                        initial_pace="AVERAGE_PACE",
-                    )
+                    _ct = get_context_tracker(game_id, home_team, away_team)
                     _ct_evts = _ct.update(
                         period, time_str, home_pts, away_pts,
                         player_stats=None,
@@ -6523,9 +6519,20 @@ def _get_player_stats_espn(player_name):
 
 
 def get_player_stats(player_name):
+    import time as _time_mod
+    _cache_key = player_name.strip().lower()
+    _cached = _player_stats_cache.get(_cache_key)
+    if _cached:
+        _stats, _fetched = _cached
+        if _time_mod.time() - _fetched < _PLAYER_STATS_TTL:
+            return _stats
+
     if not BDL_API_KEY:
         print("BDL_API_KEY not set — trying ESPN fallback")
-        return _get_player_stats_espn(player_name)
+        result = _get_player_stats_espn(player_name)
+        if result:
+            _player_stats_cache[_cache_key] = (result, _time_mod.time())
+        return result
 
     # BDL search only works with a single word — use first name, then verify full match
     parts = player_name.strip().split()
@@ -6619,7 +6626,7 @@ def get_player_stats(player_name):
     ast_form = _form_score(ast)
     fg3_form = _form_score(fg3)
 
-    return {
+    _result = {
         "name":      full_name,
         "player_id": player_id,
         "position":  position,
@@ -6646,6 +6653,9 @@ def get_player_stats(player_name):
         # Historical confidence adjustment from settled picks — 0.0 until ≥5 picks tracked
         "confidence_adj": get_player_confidence_adjustment(full_name),
     }
+    import time as _time_mod2
+    _player_stats_cache[_cache_key] = (_result, _time_mod2.time())
+    return _result
 
 
 # ==========================
@@ -7333,6 +7343,8 @@ def get_odds_full():
 _props_cache        = []   # cached props data
 _props_cache_hour   = -1   # -1 = never seeded; 1 = seeded (matches _odds_cache_hour convention)
 _props_cache_ts     = 0.0  # epoch time of last real API fetch (throttles retries to 1 per 10 min)
+_player_stats_cache: dict = {}   # player_name -> (stats_dict, fetched_at_epoch) — 90 min TTL
+_PLAYER_STATS_TTL   = 5400       # 90 minutes
 
 _PROPS_CACHE_TTL = 1800  # seconds — re-fetch at most once per 30 minutes
 
@@ -10663,7 +10675,7 @@ def run_full_system():
 
                     # ── Load learned thresholds once per player ──────────
                     _thr       = load_learning_data().get("script_thresholds") or _SCRIPT_THRESHOLD_DEFAULTS
-                    _min_gate  = _thr.get("prop_minutes_gate", _SCRIPT_THRESHOLD_DEFAULTS["prop_minutes_gate"])
+                    _min_gate  = min(_thr.get("prop_minutes_gate", _SCRIPT_THRESHOLD_DEFAULTS["prop_minutes_gate"]), 28)
                     _start_thr = _thr.get("prop_starter_mins", _SCRIPT_THRESHOLD_DEFAULTS["prop_starter_mins"])
                     _usg_gate  = _thr.get("prop_usage_gate",   _SCRIPT_THRESHOLD_DEFAULTS["prop_usage_gate"])
 
@@ -12606,7 +12618,7 @@ def send_daily_system():
         try:
             todays_bets = [
                 b for b in load_bets()
-                if b.get("time", "").startswith(today_str)
+                if str(b.get("time") or "").startswith(today_str)
                 and b.get("betType", "") in (
                     "MONEYLINE", "SPREAD", "TOTAL", "OVER", "UNDER",
                     "PROP", "points", "rebounds", "assists", "threes"
@@ -12633,7 +12645,7 @@ def send_daily_system():
         try:
             todays_all = [
                 b for b in load_bets()
-                if b.get("time", "").startswith(today_str)
+                if str(b.get("time") or "").startswith(today_str)
                 and b.get("pick_category", "") == "VIP_LOCK"
             ]
             if todays_all:
