@@ -514,7 +514,7 @@ def cmd_picks(chat_id):
             cur.execute("""
                 SELECT game, pick, bet_type, result
                 FROM bets
-                WHERE DATE(COALESCE(bet_time, created_at)) = %s
+                WHERE DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York') = %s
                 ORDER BY COALESCE(bet_time, created_at) ASC
             """, (today_et,))
             rows = cur.fetchall()
@@ -2814,7 +2814,7 @@ def cmd_update_ml(chat_id):
             cur.execute("""
                 SELECT id, player, pick, line, bet_type FROM bets
                 WHERE result IS NULL
-                  AND DATE(COALESCE(bet_time, created_at)) = %s
+                  AND DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York') = %s
                   AND (
                       pick_category IN ('INDIVIDUAL', 'VIP_LOCK')
                       OR bet_type IN ('ML', 'TOTAL', 'SPREAD', 'VIP_LOCK')
@@ -2844,7 +2844,7 @@ def cmd_update_props(chat_id):
             cur.execute("""
                 SELECT id, player, pick, line FROM bets
                 WHERE result IS NULL
-                  AND DATE(COALESCE(bet_time, created_at)) = %s
+                  AND DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York') = %s
                   AND player IS NOT NULL AND player != ''
                   AND (
                       pick_category = 'ELITE_PROP'
@@ -2875,7 +2875,7 @@ def cmd_update_sgp(chat_id):
             cur.execute("""
                 SELECT id, player, pick, line FROM bets
                 WHERE result IS NULL AND pick_category = 'SGP'
-                  AND DATE(COALESCE(bet_time, created_at)) = %s
+                  AND DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York') = %s
                 ORDER BY id DESC
             """, (today_et,))
             for bid, player_desc, pick_text, line in cur.fetchall():
@@ -2989,7 +2989,7 @@ def cmd_update_edge(chat_id):
             cur.execute("""
                 SELECT id, player, pick, line FROM bets
                 WHERE result IS NULL
-                  AND DATE(COALESCE(bet_time, created_at)) = %s
+                  AND DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York') = %s
                   AND (pick_category = 'EDGE_FADE' OR bet_type IN ('EDGE_FADE', 'FADE'))
                 ORDER BY id DESC
             """, (today_et,))
@@ -3292,7 +3292,7 @@ def cmd_today_picks(chat_id):
             cur.execute("""
                 SELECT game, player, pick, bet_type, pick_category, line, odds, result, confidence
                 FROM bets
-                WHERE DATE(COALESCE(bet_time, created_at)) = %s
+                WHERE DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York') = %s
                 ORDER BY COALESCE(bet_time, created_at) ASC
             """, (today_et,))
             rows = cur.fetchall()
@@ -3533,7 +3533,7 @@ def _live_pick_tracker():
                    prob, edge, confidence, odds
             FROM bets
             WHERE result IS NULL
-              AND DATE(COALESCE(bet_time, created_at)) = %s
+              AND DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York') = %s
               AND player IS NOT NULL AND player != ''
         """, (today_et,))
         bet_rows = cur.fetchall()
@@ -8004,7 +8004,7 @@ def _notify_pick_result(bet, actual_value=None):
                     FROM bets
                     WHERE pick_category = 'SGP'
                       AND game = %s
-                      AND DATE(COALESCE(bet_time, created_at)) = %s
+                      AND DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York') = %s
                     ORDER BY id ASC
                 """, (game, today_et))
             else:  # CROSS_GAME_PARLAY
@@ -8012,7 +8012,7 @@ def _notify_pick_result(bet, actual_value=None):
                     SELECT player, pick, line, result, actual_value
                     FROM bets
                     WHERE pick_category = 'CROSS_GAME_PARLAY'
-                      AND DATE(COALESCE(bet_time, created_at)) = %s
+                      AND DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York') = %s
                     ORDER BY id ASC
                 """, (today_et,))
 
@@ -8029,14 +8029,14 @@ def _notify_pick_result(bet, actual_value=None):
                         UPDATE bets SET result = 'loss'
                         WHERE pick_category = 'SGP'
                           AND game = %s
-                          AND DATE(COALESCE(bet_time, created_at)) = %s
+                          AND DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York') = %s
                           AND result IS NULL
                     """, (game, today_et))
                 else:
                     cur.execute("""
                         UPDATE bets SET result = 'loss'
                         WHERE pick_category = 'CROSS_GAME_PARLAY'
-                          AND DATE(COALESCE(bet_time, created_at)) = %s
+                          AND DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York') = %s
                           AND result IS NULL
                     """, (today_et,))
                 conn.commit()
@@ -8047,7 +8047,7 @@ def _notify_pick_result(bet, actual_value=None):
                         FROM bets
                         WHERE pick_category = 'SGP'
                           AND game = %s
-                          AND DATE(COALESCE(bet_time, created_at)) = %s
+                          AND DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York') = %s
                         ORDER BY id ASC
                     """, (game, today_et))
                 else:
@@ -8055,7 +8055,7 @@ def _notify_pick_result(bet, actual_value=None):
                         SELECT player, pick, line, result, actual_value
                         FROM bets
                         WHERE pick_category = 'CROSS_GAME_PARLAY'
-                          AND DATE(COALESCE(bet_time, created_at)) = %s
+                          AND DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York') = %s
                         ORDER BY id ASC
                     """, (today_et,))
                 legs = cur.fetchall()
@@ -12025,7 +12025,7 @@ def run():
                     SELECT game, pick, bet_type, odds, prob, confidence, script,
                            game_total, game_spread
                     FROM bets
-                    WHERE DATE(bet_time) = %s
+                    WHERE DATE(bet_time AT TIME ZONE 'America/New_York') = %s
                       AND bet_type IN ('ML', 'MONEYLINE', 'TOTAL', 'SPREAD', 'OVER', 'UNDER')
                 """, (_card_today,))
                 _bf_rows = _bf_cur.fetchall()
@@ -12581,7 +12581,7 @@ def send_daily_system():
                     _cc = _chk.cursor()
                     _cc.execute(
                         "SELECT 1 FROM bets WHERE bet_type='VIP_LOCK' "
-                        "AND DATE(COALESCE(bet_time, created_at)) = %s LIMIT 1",
+                        "AND DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York') = %s LIMIT 1",
                         (today_str,)
                     )
                     if _cc.fetchone():
