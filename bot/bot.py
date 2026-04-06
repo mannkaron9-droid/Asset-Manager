@@ -1718,6 +1718,11 @@ def _save_pick_legs_to_bets(candidates, bet_type, game_label, timestamp=None):
             else:
                 cat = "neutral_prop"
 
+            # Embed prop_type into pick so the settlement pass can resolve the stat.
+            # Format: "OVER|points", "UNDER|rebounds", etc.  Legacy rows stored
+            # bare "OVER"/"UNDER"; the resolver handles both forms.
+            pick_stored = f"{pick}|{ptype}" if ptype else pick
+
             try:
                 cur.execute("""
                     INSERT INTO bets
@@ -1727,7 +1732,7 @@ def _save_pick_legs_to_bets(candidates, bet_type, game_label, timestamp=None):
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT DO NOTHING
                 """, (
-                    game_label, pname, pick, bet_type,
+                    game_label, pname, pick_stored, bet_type,
                     line, odds, conf,
                     ev, is_f, is_b, fade_t,
                     cat, ts, ts,
@@ -8482,23 +8487,48 @@ def update_results():
 
                 _dp_upd = _db_prop_conn.cursor()
                 _STAT_BDL = {"points": "pts", "rebounds": "reb", "assists": "ast", "threes": "fg3m"}
+
+                def _resolve_stat(pick_txt, stored_line, stat_row):
+                    """Return (stat_key, actual_value) or (None, None).
+                    New rows: pick is 'OVER|points' — parse directly.
+                    Legacy rows: pick is bare 'OVER'/'UNDER' — infer from
+                    which BDL stat value is numerically closest to stored_line."""
+                    _pl = (pick_txt or "").lower()
+                    # New embedded format
+                    if "|" in _pl:
+                        _part = _pl.split("|", 1)[1].strip()
+                        if "point" in _part:   return "points",   float(stat_row.get("pts") or 0)
+                        if "rebound" in _part: return "rebounds", float(stat_row.get("reb") or 0)
+                        if "assist" in _part:  return "assists",  float(stat_row.get("ast") or 0)
+                        if "three" in _part or "fg3" in _part:
+                                               return "threes",   float(stat_row.get("fg3m") or 0)
+                    # Legacy bare OVER/UNDER — infer from closest stat to stored line
+                    try:
+                        _ln = float(stored_line or 0)
+                        _candidates_stat = {
+                            "points":   abs(float(stat_row.get("pts")  or 0) - _ln),
+                            "rebounds": abs(float(stat_row.get("reb")  or 0) - _ln),
+                            "assists":  abs(float(stat_row.get("ast")  or 0) - _ln),
+                            "threes":   abs(float(stat_row.get("fg3m") or 0) - _ln),
+                        }
+                        _best = min(_candidates_stat, key=_candidates_stat.get)
+                        _best_dist = _candidates_stat[_best]
+                        if _best_dist > 8:
+                            return None, None  # No stat is plausibly close to this line
+                        _bdl_key = _STAT_BDL[_best]
+                        return _best, float(stat_row.get(_bdl_key) or 0)
+                    except Exception:
+                        return None, None
+
                 for _row in _db_prop_rows:
                     _rid, _player, _pick_txt, _line, _btype, _pcat, _game, _bet_date = _row
                     _day_lookup = _bdl_by_date.get(str(_bet_date), {})
                     _stat_row   = _day_lookup.get((_player or "").lower())
                     if not _stat_row:
                         continue
-                    # Resolve stat from pick text
-                    _pl = (_pick_txt or "").lower()
-                    if "points" in _pl:                      _rstat = "points"
-                    elif "rebounds" in _pl:                  _rstat = "rebounds"
-                    elif "assists" in _pl:                   _rstat = "assists"
-                    elif "three" in _pl or "3pt" in _pl:    _rstat = "threes"
-                    else:                                    continue
-                    _actual = _stat_row.get(_STAT_BDL[_rstat])
-                    if _actual is None:
+                    _rstat, _actual = _resolve_stat(_pick_txt, _line, _stat_row)
+                    if _rstat is None or _actual is None:
                         continue
-                    _actual = float(_actual)
                     _line_f = float(_line or 0)
                     _dir    = "OVER" if "OVER" in (_pick_txt or "").upper() else "UNDER"
                     _res    = ("win" if _actual > _line_f else "loss") if _dir == "OVER" \
