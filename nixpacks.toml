@@ -1,0 +1,20 @@
+[variables]
+NIXPACKS_PYTHON_VERSION = "3.11"
+
+[phases.setup]
+nixPkgs = ["nodejs_20"]
+
+[phases.install]
+cmds = [
+  "npm install -g pnpm@9",
+  "pnpm install --frozen-lockfile",
+  "pip install -r requirements.txt"
+]
+
+[phases.build]
+cmds = [
+  "pnpm --filter @workspace/betting-dashboard run build"
+]
+
+[start]
+cmd = "gunicorn railway_app:app --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 120"
