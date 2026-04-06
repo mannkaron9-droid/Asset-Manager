@@ -1046,28 +1046,31 @@ def cmd_void_pending(chat_id: int, date_str: str = ""):
         cur = conn.cursor()
 
         # ── Always clean up corrupt entries (None/empty/null player) ─────────
+        # Exclude neutral/fade/benefactor prop legs — those need BDL settlement.
         cur.execute("""
             SELECT id FROM bets
             WHERE (result IS NULL OR result = 'pending')
+              AND pick_category NOT IN ('neutral_prop','fade_prop','benefactor_prop')
               AND (player IS NULL OR TRIM(player) = '' OR TRIM(player) IN ('None','none'))
         """)
         corrupt_ids = [r[0] for r in cur.fetchall()]
         if corrupt_ids:
             cur.execute("UPDATE bets SET result = 'void' WHERE id = ANY(%s)", (corrupt_ids,))
 
-        # ── Build main filter ─────────────────────────────────────────
+        # ── Build main filter (never touch SGP prop legs) ─────────────
+        _excl = "AND pick_category NOT IN ('neutral_prop','fade_prop','benefactor_prop')"
         if date_str:
             cur.execute(
-                "SELECT id, game, player, pick, line, bet_type FROM bets "
-                "WHERE (result IS NULL OR result = 'pending') AND bet_time::text LIKE %s "
-                "ORDER BY bet_time",
+                f"SELECT id, game, player, pick, line, bet_type FROM bets "
+                f"WHERE (result IS NULL OR result = 'pending') {_excl} AND bet_time::text LIKE %s "
+                f"ORDER BY bet_time",
                 (f"{date_str}%",)
             )
         else:
             cur.execute(
-                "SELECT id, game, player, pick, line, bet_type FROM bets "
-                "WHERE result IS NULL OR result = 'pending' "
-                "ORDER BY bet_time"
+                f"SELECT id, game, player, pick, line, bet_type FROM bets "
+                f"WHERE (result IS NULL OR result = 'pending') {_excl} "
+                f"ORDER BY bet_time"
             )
 
         rows = cur.fetchall()
@@ -2218,26 +2221,27 @@ def cmd_forcesettle(chat_id):
             _dcur.execute("""
                 SELECT COUNT(*),
                        COUNT(*) FILTER (WHERE player IS NULL OR player = ''),
-                       COUNT(*) FILTER (WHERE result IS NOT NULL)
+                       COUNT(*) FILTER (WHERE result = 'void'),
+                       COUNT(*) FILTER (WHERE result IN ('win','loss'))
                 FROM bets
                 WHERE pick_category IN ('neutral_prop','fade_prop','benefactor_prop')
             """)
-            _tot, _empty_player, _already_settled = _dcur.fetchone()
+            _tot, _empty_player, _voided, _graded = _dcur.fetchone()
             _dcur.execute("""
-                SELECT player, pick, line,
+                SELECT player, pick, line, result,
                        DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York')
                 FROM bets
                 WHERE pick_category IN ('neutral_prop','fade_prop','benefactor_prop')
-                  AND result IS NULL
+                  AND (result IS NULL OR result = 'void')
                   AND player IS NOT NULL AND player != ''
                 ORDER BY id LIMIT 3
             """)
             _sample = _dcur.fetchall()
             _dcur.close()
             _dc.close()
-            diag_lines.append(f"📊 DB: {_tot} prop rows | {_already_settled} settled | {_empty_player} empty player")
-            for _sp, _sk, _sl, _sd in _sample:
-                diag_lines.append(f"  • {_sp} | {_sk} | line={_sl} | {_sd}")
+            diag_lines.append(f"📊 DB: {_tot} prop rows | {_graded} graded | {_voided} void | {_empty_player} empty player")
+            for _sp, _sk, _sl, _sr, _sd in _sample:
+                diag_lines.append(f"  • {_sp} | {_sk} | line={_sl} | {_sr} | {_sd}")
     except Exception as _de:
         diag_lines.append(f"⚠️ DB diag error: {_de}")
 
@@ -8564,7 +8568,7 @@ def update_results():
                 SELECT id, player, pick, line, bet_type, pick_category, game,
                        DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York')
                 FROM bets
-                WHERE result IS NULL
+                WHERE (result IS NULL OR result = 'void')
                   AND pick_category IN ('neutral_prop','fade_prop','benefactor_prop')
                   AND player IS NOT NULL AND player != ''
                 ORDER BY id
