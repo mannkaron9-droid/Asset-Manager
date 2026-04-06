@@ -8441,59 +8441,68 @@ def update_results():
     # ── DB-SIDE PROP SETTLEMENT ────────────────────────────────────────────────
     # neutral_prop / fade_prop / benefactor_prop legs are saved directly to the
     # DB bets table by _save_pick_legs_to_bets() and never appear in bets.json.
-    # This block gives them their own settlement pass so they feed the learning loop.
+    # No date restriction — handles both today's picks and the historical backlog.
     _db_prop_conn = _db_conn()
     if _db_prop_conn:
         try:
             _dp_cur = _db_prop_conn.cursor()
             _dp_cur.execute("""
-                SELECT id, player, pick, line, bet_type, pick_category, game
+                SELECT id, player, pick, line, bet_type, pick_category, game,
+                       DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York')
                 FROM bets
                 WHERE result IS NULL
                   AND pick_category IN ('neutral_prop','fade_prop','benefactor_prop')
                   AND player IS NOT NULL AND player != ''
-                  AND DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York')
-                      = ANY(%s)
-            """, (list(dates_to_check),))
+                  AND COALESCE(bet_time, created_at) >= NOW() - INTERVAL '30 days'
+                ORDER BY id
+            """)
             _db_prop_rows = _dp_cur.fetchall()
             _dp_cur.close()
 
             if _db_prop_rows:
-                # Build player-name → BDL stat row lookup for all settled games
-                _bdl_lookup = {}
-                for _d in dates_to_check:
+                # Collect unique dates across all unsettled bets so we can batch
+                # BDL API calls — one request per date, not one per bet row.
+                _bet_dates = sorted({str(r[7]) for r in _db_prop_rows if r[7]})
+                print(f"[DB-PropSettle] {len(_db_prop_rows)} unsettled bets across {len(_bet_dates)} date(s)")
+
+                # Build date → {player_lower → stat_row} lookup for final games only
+                _bdl_by_date: dict = {}
+                for _d in _bet_dates:
+                    _bdl_by_date[_d] = {}
                     try:
                         _url = f"{BDL_BASE}/stats?dates[]={_d}&per_page=100"
                         for _st in _bdl_get(_url).get("data", []):
                             _p = _st.get("player", {})
                             _nm = f"{_p.get('first_name','')} {_p.get('last_name','')}".strip().lower()
                             if "final" in (_st.get("game", {}).get("status", "")).lower():
-                                _bdl_lookup[_nm] = _st
+                                _bdl_by_date[_d][_nm] = _st
+                        print(f"[DB-PropSettle] {_d}: {len(_bdl_by_date[_d])} final player rows from BDL")
                     except Exception as _dbe:
                         print(f"[DB-PropSettle] BDL fetch error {_d}: {_dbe}")
 
                 _dp_upd = _db_prop_conn.cursor()
                 _STAT_BDL = {"points": "pts", "rebounds": "reb", "assists": "ast", "threes": "fg3m"}
-                for _rid, _player, _pick_txt, _line, _btype, _pcat, _game in _db_prop_rows:
-                    _pkey = (_player or "").lower()
-                    _stat_row = _bdl_lookup.get(_pkey)
+                for _row in _db_prop_rows:
+                    _rid, _player, _pick_txt, _line, _btype, _pcat, _game, _bet_date = _row
+                    _day_lookup = _bdl_by_date.get(str(_bet_date), {})
+                    _stat_row   = _day_lookup.get((_player or "").lower())
                     if not _stat_row:
                         continue
                     # Resolve stat from pick text
                     _pl = (_pick_txt or "").lower()
-                    if "points" in _pl:        _rstat = "points"
-                    elif "rebounds" in _pl:    _rstat = "rebounds"
-                    elif "assists" in _pl:     _rstat = "assists"
-                    elif "three" in _pl or "3pt" in _pl: _rstat = "threes"
-                    else:                      continue
+                    if "points" in _pl:                      _rstat = "points"
+                    elif "rebounds" in _pl:                  _rstat = "rebounds"
+                    elif "assists" in _pl:                   _rstat = "assists"
+                    elif "three" in _pl or "3pt" in _pl:    _rstat = "threes"
+                    else:                                    continue
                     _actual = _stat_row.get(_STAT_BDL[_rstat])
                     if _actual is None:
                         continue
-                    _actual   = float(_actual)
-                    _line_f   = float(_line or 0)
-                    _dir      = "OVER" if "OVER" in (_pick_txt or "").upper() else "UNDER"
-                    _res      = ("win" if _actual > _line_f else "loss") if _dir == "OVER" \
-                                else ("win" if _actual < _line_f else "loss")
+                    _actual = float(_actual)
+                    _line_f = float(_line or 0)
+                    _dir    = "OVER" if "OVER" in (_pick_txt or "").upper() else "UNDER"
+                    _res    = ("win" if _actual > _line_f else "loss") if _dir == "OVER" \
+                              else ("win" if _actual < _line_f else "loss")
                     try:
                         _dp_upd.execute("""
                             UPDATE bets
@@ -8506,8 +8515,8 @@ def update_results():
                         """, (_res, _actual, _actual, _rid))
                         _db_prop_conn.commit()
                         newly_settled += 1
-                        print(f"[DB-PropSettle] #{_rid} {_player} {_pick_txt} "
-                              f"actual={_actual} vs {_dir} {_line_f} → {_res}")
+                        print(f"[DB-PropSettle] #{_rid} {_player} | {_pick_txt} | "
+                              f"actual={_actual} {_dir} {_line_f} → {_res}")
                     except Exception as _upe:
                         print(f"[DB-PropSettle] update error #{_rid}: {_upe}")
                 _dp_upd.close()
