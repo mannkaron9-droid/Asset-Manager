@@ -887,18 +887,39 @@ def run_pick_through_engine(
     if shadow_hit_rates:
         sh_key  = f"{player.lower()}:{stat.lower()}"
         sh_data = shadow_hit_rates.get(sh_key)
-        if sh_data and sh_data.get("total", 0) >= 5:
+        if sh_data and sh_data.get("total", 0) >= 10:
             sh_rate = sh_data["rate"]
+            # Use actual historical hit rate as the primary true_prob.
+            # This replaces the sigmoid model when we have enough real samples.
+            ip_real = implied_probability(odds)
+            if odds > 0:
+                wp = odds / 100
+            elif odds < 0:
+                wp = 100 / abs(odds)
+            else:
+                wp = 0.909
+            sh_ev_val = (sh_rate * wp) - (1 - sh_rate)
+            ev = EVResult(
+                true_prob      = round(sh_rate, 4),
+                implied_prob   = round(ip_real, 4),
+                ev             = round(sh_ev_val, 4),
+                is_positive    = sh_rate > ip_real,
+                recommendation = ev.recommendation,
+            )
+            print(f"  [HitRate] {player} {stat}: historical {sh_rate:.0%} (n={sh_data['total']}) used as true_prob | ev={sh_ev_val:.3f}")
+        elif sh_data and sh_data.get("total", 0) >= 5:
+            sh_rate = sh_data["rate"]
+            # Fewer samples — use as edge_bonus only (not full override)
             if sh_rate >= 0.65:
-                edge_bonus += 0.05   # bot has been right ≥65% — back it
+                edge_bonus += 0.05
                 print(f"  [Shadow] {player} {stat}: hit {sh_rate:.0%} → +0.05 edge")
             elif sh_rate >= 0.55:
-                edge_bonus += 0.02   # slightly above break-even → mild boost
+                edge_bonus += 0.02
             elif sh_rate <= 0.35:
-                edge_bonus -= 0.06   # bot keeps getting this wrong → penalize hard
+                edge_bonus -= 0.06
                 print(f"  [Shadow] {player} {stat}: hit {sh_rate:.0%} → -0.06 edge")
             elif sh_rate <= 0.45:
-                edge_bonus -= 0.03   # below break-even → soft penalty
+                edge_bonus -= 0.03
 
     # ── Historical win-rate context (all stored learning data) ───────────────
     # Every pick uses what the bot has actually learned from settled results:
@@ -977,9 +998,11 @@ def run_pick_through_engine(
         print(f"  [Engine] REJECT {player} {stat}: RED juice + negative EV")
         return None
 
-    if not ev.is_positive and not is_fade:
-        # Non-fades must be +EV. Fades get a pass because the UNDER is the pick.
-        print(f"  [Engine] REJECT {player} {stat}: negative EV ({ev.ev:.3f})")
+    if ev.ev < -0.05 and not is_fade:
+        # Reject only strongly negative EV. Breakeven and mildly negative legs
+        # still compete — the slip-level grading filters quality from there.
+        # Fades always pass because the UNDER is the pick.
+        print(f"  [Engine] REJECT {player} {stat}: EV too negative ({ev.ev:.3f} < -0.05)")
         return None
 
     if not script_result["fits"] and not is_fade:
@@ -1279,11 +1302,32 @@ def run_full_pipeline(
     # ── Layer 7: EV & Validation Gate ─────────────────────────────────────────
     ev = ev_check(prediction, line, odds, direction, stat_std)
 
+    # Override true_prob with real historical hit rate when enough data exists.
+    # This is more accurate than the sigmoid model because it reflects actual
+    # player-vs-line outcomes rather than an estimated distribution.
+    if shadow_hit_rates:
+        sh_key_l7  = f"{player.lower()}:{stat.lower()}"
+        sh_data_l7 = shadow_hit_rates.get(sh_key_l7)
+        if sh_data_l7 and sh_data_l7.get("total", 0) >= 10:
+            sh_rate_l7 = sh_data_l7["rate"]
+            ip_l7 = implied_probability(odds)
+            wp_l7 = (odds / 100) if odds > 0 else (100 / abs(odds)) if odds < 0 else 0.909
+            sh_ev_l7 = (sh_rate_l7 * wp_l7) - (1 - sh_rate_l7)
+            ev = EVResult(
+                true_prob      = round(sh_rate_l7, 4),
+                implied_prob   = round(ip_l7, 4),
+                ev             = round(sh_ev_l7, 4),
+                is_positive    = sh_rate_l7 > ip_l7,
+                recommendation = ev.recommendation,
+            )
+            print(f"  [HitRate-L7] {player} {stat}: historical {sh_rate_l7:.0%} (n={sh_data_l7['total']}) used as true_prob | ev={sh_ev_l7:.3f}")
+
     if j.flag == "RED" and not ev.is_positive:
         print(f"  {tag} L7 BLOCK: RED juice + negative EV")
         return None
-    if not ev.is_positive and not is_fade:
-        print(f"  {tag} L7 BLOCK: negative EV ({ev.ev:.3f})")
+    if ev.ev < -0.05 and not is_fade:
+        # Reject only strongly negative EV — breakeven legs compete at slip level.
+        print(f"  {tag} L7 BLOCK: EV too negative ({ev.ev:.3f} < -0.05)")
         return None
 
     # ── Layer 8: Live Context (ContextTracker) ─────────────────────────────────
@@ -1328,10 +1372,13 @@ def run_full_pipeline(
     kelly_prob  = ev.true_prob
     kelly_dec   = abs(odds) / 100 + 1 if odds > 0 else 100 / abs(odds) + 1
     kelly_raw   = (kelly_prob * kelly_dec - 1) / (kelly_dec - 1) if kelly_dec > 1 else 0
-    kelly_bet   = max(kelly_raw * kelly_frac, 0)
-    if kelly_bet <= 0:
-        print(f"  {tag} L10 BLOCK: Kelly sizing = 0 (no edge)")
+    kelly_bet   = kelly_raw * kelly_frac
+    if kelly_raw < -0.05:
+        # Only hard-block when Kelly strongly says no edge — matches EV gate.
+        # Breakeven legs (kelly_raw ≈ 0) get 1-unit sizing and compete at slip level.
+        print(f"  {tag} L10 BLOCK: Kelly strongly negative ({kelly_raw:.3f})")
         return None
+    kelly_bet   = max(kelly_bet, 0)
     kelly_units = 3 if kelly_bet >= 0.08 else (2 if kelly_bet >= 0.04 else 1)
 
     # ── Build final confidence ─────────────────────────────────────────────────
@@ -1479,7 +1526,7 @@ def _assemble_slip_attempt(
     hit_prob = compute_parlay_hit_prob(legs)
     slip_ev  = calculate_parlay_ev(hit_prob, legs)
     payout   = estimate_payout(legs)
-    send_vip  = grade in ("A", "B")
+    send_vip  = grade in ("A", "B", "C")   # C = best available tonight
     send_free = grade == "A"
 
     return Slip(
