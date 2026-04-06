@@ -8655,6 +8655,75 @@ def update_results():
                     except Exception as _ee:
                         print(f"[DB-PropSettle] ESPN fallback error {_d}: {_ee}")
 
+                # ── NBA official API fallback (stats.nba.com) ──────────────────────
+                # Third tier: catches anything ESPN also misses (rare).
+                _nba_hdrs = {
+                    "Host": "stats.nba.com",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Accept": "application/json, text/plain, */*",
+                    "Referer": "https://www.nba.com/",
+                    "Origin": "https://www.nba.com",
+                    "x-nba-stats-origin": "stats",
+                    "x-nba-stats-token": "true",
+                    "Connection": "keep-alive",
+                }
+                _nba_by_date: dict = {}
+                for _d in _bet_dates:
+                    _nba_by_date[_d] = {}
+                    try:
+                        _mo, _dy, _yr = _d[5:7], _d[8:10], _d[:4]
+                        _gdate_nba = f"{_mo}/{_dy}/{_yr}"  # "04/02/2026"
+                        import urllib.request as _nba_ur
+                        _sb_req = _nba_ur.Request(
+                            f"https://stats.nba.com/stats/scoreboardv2?GameDate={_gdate_nba}&LeagueID=00&DayOffset=0",
+                            headers=_nba_hdrs
+                        )
+                        with _nba_ur.urlopen(_sb_req, timeout=15) as _r:
+                            _sb_nba = json.loads(_r.read())
+                        _nba_game_ids = []
+                        for _rs in _sb_nba.get("resultSets", []):
+                            if _rs.get("name") == "GameHeader":
+                                _nh = _rs.get("headers", [])
+                                _nr = _rs.get("rowSet", [])
+                                _si = _nh.index("GAME_STATUS_TEXT") if "GAME_STATUS_TEXT" in _nh else -1
+                                _gi = _nh.index("GAME_ID") if "GAME_ID" in _nh else 0
+                                for _nr_row in _nr:
+                                    if _si >= 0 and "Final" in str(_nr_row[_si]):
+                                        _nba_game_ids.append(str(_nr_row[_gi]))
+                        for _gid in _nba_game_ids:
+                            try:
+                                _bs_req = _nba_ur.Request(
+                                    f"https://stats.nba.com/stats/boxscoretraditionalv2?GameID={_gid}"
+                                    "&StartPeriod=0&EndPeriod=10&StartRange=0&EndRange=2800&RangeType=0",
+                                    headers=_nba_hdrs
+                                )
+                                with _nba_ur.urlopen(_bs_req, timeout=15) as _r:
+                                    _bs_nba = json.loads(_r.read())
+                                for _rs in _bs_nba.get("resultSets", []):
+                                    if _rs.get("name") == "PlayerStats":
+                                        _nh = _rs.get("headers", [])
+                                        _idx = lambda k: _nh.index(k) if k in _nh else -1
+                                        _i_nm  = _idx("PLAYER_NAME")
+                                        _i_pts = _idx("PTS")
+                                        _i_reb = _idx("REB")
+                                        _i_ast = _idx("AST")
+                                        _i_fg3 = _idx("FG3M")
+                                        for _nr_row in _rs.get("rowSet", []):
+                                            _nm = str(_nr_row[_i_nm]).lower() if _i_nm >= 0 else ""
+                                            if not _nm:
+                                                continue
+                                            _nba_by_date[_d][_nm] = {
+                                                "pts":  float(_nr_row[_i_pts] or 0) if _i_pts >= 0 else 0,
+                                                "reb":  float(_nr_row[_i_reb] or 0) if _i_reb >= 0 else 0,
+                                                "ast":  float(_nr_row[_i_ast] or 0) if _i_ast >= 0 else 0,
+                                                "fg3m": float(_nr_row[_i_fg3] or 0) if _i_fg3 >= 0 else 0,
+                                            }
+                            except Exception:
+                                continue
+                        print(f"[DB-PropSettle] {_d}: {len(_nba_by_date[_d])} NBA player rows")
+                    except Exception as _ne:
+                        print(f"[DB-PropSettle] NBA fallback error {_d}: {_ne}")
+
                 _dp_upd = _db_prop_conn.cursor()
                 _STAT_BDL = {"points": "pts", "rebounds": "reb", "assists": "ast", "threes": "fg3m"}
 
@@ -8697,10 +8766,12 @@ def update_results():
                 for _row in _db_prop_rows:
                     _rid, _player, _pick_txt, _line, _btype, _pcat, _game, _bet_date = _row
                     _pkey = (_player or "").strip().lower()
-                    # Try BDL first, then ESPN fallback for fringe/two-way players
+                    # Three-tier lookup: BDL → ESPN → NBA official API
                     _stat_row = _bdl_by_date.get(str(_bet_date), {}).get(_pkey)
                     if not _stat_row:
                         _stat_row = _espn_by_date.get(str(_bet_date), {}).get(_pkey)
+                    if not _stat_row:
+                        _stat_row = _nba_by_date.get(str(_bet_date), {}).get(_pkey)
                     if not _stat_row:
                         continue
                     _rstat, _actual = _resolve_stat(_pick_txt, _line, _stat_row)
@@ -14026,6 +14097,12 @@ def _register_commands():
     admin_commands = public_commands + [
         {"command": "admins",         "description": "System health panel"},
         {"command": "todaypicks",     "description": "Full detailed card of today's picks"},
+        {"command": "forcesettle",    "description": "Run full settlement pass on all pending picks"},
+        {"command": "debugsettle",    "description": "Debug prop settlement — dumps sample rows + live BDL test"},
+        {"command": "voidpending",    "description": "Void pending picks — /voidpending or /voidpending YYYY-MM-DD"},
+        {"command": "checkpending",   "description": "All unsettled picks grouped by date"},
+        {"command": "sgp",            "description": "Generate & post an SGP pick"},
+        {"command": "feedpick",       "description": "Post a manual feed pick"},
         {"command": "editfeedpick",   "description": "Edit a feed pick (/editfeedpick <id> <text>)"},
         {"command": "deletefeedpick", "description": "Delete a feed pick (/deletefeedpick <id>)"},
         {"command": "updatefeed",     "description": "Live feed pick status"},
@@ -14035,14 +14112,11 @@ def _register_commands():
         {"command": "updatecgp",      "description": "Live CGP status"},
         {"command": "updateedge",     "description": "Live Edge-Fade status"},
         {"command": "checkpick",      "description": "Check a pick result (/checkpick <id>)"},
-        {"command": "settle",         "description": "Settle a pick (/settle <id> W/L)"},
-        {"command": "feedpick",       "description": "Post a manual feed pick"},
+        {"command": "settle",         "description": "Settle a pick manually (/settle <id> W/L)"},
         {"command": "bankroll",       "description": "Bankroll info"},
         {"command": "historyfeed",    "description": "Feed pick history"},
         {"command": "historybot",     "description": "Bot pick history"},
         {"command": "historylive",    "description": "Live pick history"},
-        {"command": "checkpending",   "description": "All unsettled picks grouped by date"},
-        {"command": "voidpending",    "description": "Void pending picks — /voidpending or /voidpending YYYY-MM-DD"},
         {"command": "calibrate",      "description": "Calibrate model"},
         {"command": "linemonitor",    "description": "Monitor line movement"},
         {"command": "dbstatus",       "description": "DB table counts, thresholds & learning state"},
