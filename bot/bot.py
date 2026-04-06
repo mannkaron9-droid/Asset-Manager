@@ -2221,6 +2221,72 @@ def cmd_forcesettle(chat_id):
         print(f"[ForceSettle] error: {e}")
 
 
+def cmd_debugsettle(chat_id):
+    """
+    /debugsettle — Admin: show first 5 unsettled neutral_prop rows and
+    test BDL lookup for the most recent date found, so we can diagnose
+    why /forcesettle returns 0.
+    """
+    lines = ["🔍 <b>Debug: unsettled prop rows</b>"]
+    conn = _db_conn()
+    if not conn:
+        reply(chat_id, "❌ No DB connection.")
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, player, pick, line, pick_category,
+                   DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York'),
+                   result
+            FROM bets
+            WHERE pick_category IN ('neutral_prop','fade_prop','benefactor_prop')
+            ORDER BY id
+            LIMIT 8
+        """)
+        rows = cur.fetchall()
+        cur.execute("""
+            SELECT COUNT(*) FROM bets
+            WHERE pick_category IN ('neutral_prop','fade_prop','benefactor_prop')
+              AND result IS NULL
+              AND player IS NOT NULL AND player != ''
+        """)
+        total_unsettled = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+
+        lines.append(f"Total unsettled (player not null): <b>{total_unsettled}</b>")
+        lines.append(f"First 8 rows (any result):\n")
+        for rid, player, pick, line, pcat, bdate, result in rows:
+            lines.append(
+                f"  #{rid} | {player or '(empty)'} | {pick} | line={line} | "
+                f"{pcat} | {bdate} | result={result}"
+            )
+
+        # Now test BDL for the most recent date found
+        dates_found = sorted({str(r[5]) for r in rows if r[5]}, reverse=True)
+        if dates_found:
+            test_date = dates_found[0]
+            lines.append(f"\n🌐 BDL test for {test_date}:")
+            try:
+                url = f"{BDL_BASE}/stats?dates[]={test_date}&per_page=100"
+                data = _bdl_get(url).get("data", [])
+                final_players = []
+                for st in data:
+                    p = st.get("player", {})
+                    nm = f"{p.get('first_name','')} {p.get('last_name','')}".strip()
+                    status = st.get("game", {}).get("status", "")
+                    if "final" in status.lower():
+                        final_players.append(nm)
+                lines.append(f"  {len(final_players)} final-game players from BDL")
+                lines.append(f"  First 5: {', '.join(final_players[:5]) or '(none)'}")
+            except Exception as bdl_e:
+                lines.append(f"  BDL error: {bdl_e}")
+    except Exception as e:
+        lines.append(f"❌ DB error: {e}")
+
+    reply(chat_id, "\n".join(lines), parse_mode="HTML")
+
+
 def cmd_settle(chat_id, raw):
     """
     /settle <id> <win|loss|push>
@@ -6009,6 +6075,10 @@ def handle_commands():
                 elif text == "/forcesettle" and str(chat_id) == str(ADMIN_ID):
                     cmd_forcesettle(chat_id)
                 elif text == "/forcesettle" and str(chat_id) != str(ADMIN_ID):
+                    reply(chat_id, "❌ Admin only.")
+                elif text == "/debugsettle" and str(chat_id) == str(ADMIN_ID):
+                    cmd_debugsettle(chat_id)
+                elif text == "/debugsettle" and str(chat_id) != str(ADMIN_ID):
                     reply(chat_id, "❌ Admin only.")
                 elif text.startswith("/settle") and str(chat_id) == str(ADMIN_ID):
                     raw_arg = text[7:].strip()
