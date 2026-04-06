@@ -8492,16 +8492,21 @@ def update_results():
                     """Return (stat_key, actual_value) or (None, None).
                     New rows: pick is 'OVER|points' — parse directly.
                     Legacy rows: pick is bare 'OVER'/'UNDER' — infer from
-                    which BDL stat value is numerically closest to stored_line."""
+                    which BDL stat value is numerically closest to stored_line.
+                    Accepts both full words and FanDuel/BDL abbreviations:
+                      pts/points, reb/rebounds, ast/assists, 3pt/fg3/threes."""
                     _pl = (pick_txt or "").lower()
                     # New embedded format
                     if "|" in _pl:
                         _part = _pl.split("|", 1)[1].strip()
-                        if "point" in _part:   return "points",   float(stat_row.get("pts") or 0)
-                        if "rebound" in _part: return "rebounds", float(stat_row.get("reb") or 0)
-                        if "assist" in _part:  return "assists",  float(stat_row.get("ast") or 0)
-                        if "three" in _part or "fg3" in _part:
-                                               return "threes",   float(stat_row.get("fg3m") or 0)
+                        if "point" in _part or _part == "pts":
+                            return "points",   float(stat_row.get("pts")  or 0)
+                        if "rebound" in _part or _part == "reb":
+                            return "rebounds", float(stat_row.get("reb")  or 0)
+                        if "assist" in _part or _part == "ast":
+                            return "assists",  float(stat_row.get("ast")  or 0)
+                        if "three" in _part or "fg3" in _part or "3pt" in _part:
+                            return "threes",   float(stat_row.get("fg3m") or 0)
                     # Legacy bare OVER/UNDER — infer from closest stat to stored line
                     try:
                         _ln = float(stored_line or 0)
