@@ -634,6 +634,7 @@ def _run_line_monitor_loop(
                 _load_and_apply_team_styles()
                 _lm_shadow = _load_shadow_hit_rates()
                 _lm_wr_ctx = _load_win_rate_context()
+                _lm_mults  = _load_conf_multipliers()
                 slip, _, _ = build_slip_from_props(
                     props_data          = odds,
                     get_player_stats_fn = get_player_stats,
@@ -644,6 +645,7 @@ def _run_line_monitor_loop(
                     back_to_back_teams  = _lm_b2b,
                     shadow_hit_rates    = _lm_shadow,
                     win_rate_context    = _lm_wr_ctx,
+                    conf_multipliers    = _lm_mults,
                 )
 
                 if slip is None:
@@ -1468,6 +1470,7 @@ def _get_engine_candidates(filtered_props, all_props, game_data, ht, at, top_n=1
     _load_and_apply_team_styles()
     _vip_shadow = _load_shadow_hit_rates()
     _vip_wr_ctx = _load_win_rate_context()
+    _vip_mults  = _load_conf_multipliers()
 
     candidates = get_top_candidates(
         props_data=props,
@@ -1494,6 +1497,7 @@ def _get_engine_candidates(filtered_props, all_props, game_data, ht, at, top_n=1
                 back_to_back_teams=b2b,
                 shadow_hit_rates=_vip_shadow,
                 win_rate_context=_vip_wr_ctx,
+                conf_multipliers=_vip_mults,
             )
             if slip and slip.legs:
                 candidates = [
@@ -10174,6 +10178,7 @@ def find_player_edges():
         _load_and_apply_team_styles()
         _fe_shadow = _load_shadow_hit_rates()
         _fe_wr_ctx = _load_win_rate_context()
+        _fe_mults  = _load_conf_multipliers()
 
         slip, _, _ = build_slip_from_props(
             props_data          = odds_data,
@@ -10185,6 +10190,7 @@ def find_player_edges():
             back_to_back_teams  = b2b_teams,
             shadow_hit_rates    = _fe_shadow,
             win_rate_context    = _fe_wr_ctx,
+            conf_multipliers    = _fe_mults,
         )
 
         if slip:
@@ -11130,6 +11136,7 @@ def run_edge_fade_7():
             back_to_back_teams  = _b2b,
             shadow_hit_rates    = _shadow_rates,
             win_rate_context    = _wr_ctx,
+            conf_multipliers    = _conf_mults,
         )
 
         if slip is None:
