@@ -2196,6 +2196,26 @@ def cmd_feedpick(chat_id, raw):
         reply(chat_id, f"⚠️ Could not save pick: {e}")
 
 
+def cmd_forcesettle(chat_id):
+    """
+    /forcesettle — Admin: immediately run a full settlement pass.
+    Settles JSON picks (ML/totals/spreads) AND DB-stored neutral_prop /
+    fade_prop / benefactor_prop legs from SGP/CGP that auto-settle misses.
+    """
+    reply(chat_id, "⚙️ Running settlement pass now...")
+    try:
+        n = update_results()
+        try:
+            from bot.decision_engine import pe_flush
+            pe_flush()
+        except Exception:
+            pass
+        reply(chat_id, f"✅ Settlement complete — {n or 0} pick(s) newly graded.")
+    except Exception as e:
+        reply(chat_id, f"❌ Settlement error: {e}")
+        print(f"[ForceSettle] error: {e}")
+
+
 def cmd_settle(chat_id, raw):
     """
     /settle <id> <win|loss|push>
@@ -5980,6 +6000,10 @@ def handle_commands():
                     raw_arg = text[9:].strip()
                     cmd_feedpick(chat_id, raw_arg)
                 elif text.startswith("/feedpick") and str(chat_id) != str(ADMIN_ID):
+                    reply(chat_id, "❌ Admin only.")
+                elif text == "/forcesettle" and str(chat_id) == str(ADMIN_ID):
+                    cmd_forcesettle(chat_id)
+                elif text == "/forcesettle" and str(chat_id) != str(ADMIN_ID):
                     reply(chat_id, "❌ Admin only.")
                 elif text.startswith("/settle") and str(chat_id) == str(ADMIN_ID):
                     raw_arg = text[7:].strip()
