@@ -409,24 +409,132 @@ def api_health():
     return jsonify({"ok": True})
 
 
-# ── Stripe checkout ────────────────────────────────────────────────────────────
+# ── Stripe helpers ──────────────────────────────────────────────────────────────
+def _stripe_key():
+    raw = os.environ.get("STRIPE_SECRET_KEY", "")
+    return raw.strip().replace("\n","").replace("\r","").replace("\\n","").replace("\\r","").replace(" ","")
+
+def _tg_send_dm(chat_id, text):
+    """Send a Telegram DM to a user via the bot token."""
+    import urllib.request, urllib.parse
+    token = os.environ.get("BOT_TOKEN", "")
+    if not token or not chat_id:
+        return False
+    try:
+        payload = json.dumps({
+            "chat_id": str(chat_id),
+            "text": text,
+            "parse_mode": "Markdown",
+        }).encode()
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        req = urllib.request.Request(url, data=payload,
+              headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status == 200
+    except Exception as e:
+        print(f"[Webhook] DM send failed to {chat_id}: {e}")
+        return False
+
+def _tg_create_invite():
+    """Create a single-use VIP channel invite link (bot must be admin of the channel)."""
+    import urllib.request
+    token = os.environ.get("BOT_TOKEN", "")
+    vip   = os.environ.get("VIP_CHANNEL", "")
+    if not token or not vip:
+        return None
+    try:
+        payload = json.dumps({
+            "chat_id": vip,
+            "member_limit": 1,
+            "name": "VIP Auto-Invite",
+        }).encode()
+        url = f"https://api.telegram.org/bot{token}/createChatInviteLink"
+        req = urllib.request.Request(url, data=payload,
+              headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+            return data.get("result", {}).get("invite_link")
+    except Exception as e:
+        print(f"[Webhook] invite link creation failed: {e}")
+        return None
+
+def _db_add_subscriber(telegram_id, stripe_customer_id, stripe_subscription_id):
+    conn = _db_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO subscribers
+                (telegram_id, stripe_customer_id, stripe_subscription_id, status, created_at)
+            VALUES (%s, %s, %s, 'active', NOW())
+            ON CONFLICT (telegram_id) DO UPDATE
+                SET stripe_customer_id     = EXCLUDED.stripe_customer_id,
+                    stripe_subscription_id = EXCLUDED.stripe_subscription_id,
+                    status                 = 'active',
+                    cancelled_at           = NULL
+        """, (str(telegram_id), stripe_customer_id, stripe_subscription_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"[Webhook] DB subscriber insert failed: {e}")
+        try: conn.close()
+        except Exception: pass
+        return False
+
+def _db_cancel_subscriber(stripe_subscription_id):
+    conn = _db_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE subscribers
+               SET status = 'cancelled', cancelled_at = NOW()
+             WHERE stripe_subscription_id = %s
+            RETURNING telegram_id
+        """, (stripe_subscription_id,))
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+        return row[0] if row else None
+    except Exception as e:
+        print(f"[Webhook] DB cancel failed: {e}")
+        try: conn.close()
+        except Exception: pass
+        return None
+
+
+# ── Stripe checkout ─────────────────────────────────────────────────────────────
 @app.route("/create-checkout-session", methods=["POST", "GET"])
 def create_checkout():
-    stripe_key = os.environ.get("STRIPE_SECRET_KEY", "")
     price_id = os.environ.get("STRIPE_PRICE_ID", "")
-    if not stripe_key or not price_id:
+    sk = _stripe_key()
+    if not sk or not price_id:
         return jsonify({"error": "Stripe not configured"}), 500
     try:
         import stripe
-        stripe.api_key = stripe_key.strip().replace("\n", "").replace("\r", "").replace("\\n", "").replace("\\r", "").replace(" ", "")
+        stripe.api_key = sk
         railway_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN",
                                        "asset-manager-production-0f7d.up.railway.app")
         domain = "https://" + railway_domain
+
+        # Capture telegram_id if passed via ?tg= (set by /subscribe command)
+        tg_id  = request.args.get("tg", "") or request.form.get("tg", "")
+        meta   = {"telegram_id": str(tg_id)} if tg_id else {}
+
         session = stripe.checkout.Session.create(
             payment_method_types=["card"],
             mode="subscription",
             line_items=[{"price": price_id, "quantity": 1}],
-            subscription_data={"trial_period_days": 7},
+            subscription_data={
+                "trial_period_days": 7,
+                "metadata": meta,
+            },
+            metadata=meta,
             success_url=domain + "/dashboard",
             cancel_url=domain + "/",
         )
@@ -438,6 +546,134 @@ def create_checkout():
 @app.route("/join", methods=["GET"])
 def join():
     return create_checkout()
+
+
+# ── Stripe webhook ──────────────────────────────────────────────────────────────
+@app.route("/stripe-webhook", methods=["POST"])
+def stripe_webhook():
+    import stripe
+    stripe.api_key = _stripe_key()
+    webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+    admin_id       = os.environ.get("ADMIN_ID", "6723106141")
+
+    payload = request.get_data()
+    sig_header = request.headers.get("Stripe-Signature", "")
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
+    except stripe.error.SignatureVerificationError as e:
+        print(f"[Webhook] Signature invalid: {e}")
+        return jsonify({"error": "invalid signature"}), 400
+    except Exception as e:
+        print(f"[Webhook] Parse error: {e}")
+        return jsonify({"error": str(e)}), 400
+
+    etype = event["type"]
+    print(f"[Webhook] Event: {etype}")
+
+    # ── New subscriber completed checkout ───────────────────────────────────────
+    if etype == "checkout.session.completed":
+        session       = event["data"]["object"]
+        tg_id         = (session.get("metadata") or {}).get("telegram_id", "")
+        customer_id   = session.get("customer", "")
+        sub_id        = session.get("subscription", "")
+
+        # If sub_id not on session yet (async), fetch it
+        if not sub_id and customer_id:
+            try:
+                subs = stripe.Subscription.list(customer=customer_id, limit=1)
+                sub_id = subs.data[0].id if subs.data else ""
+            except Exception:
+                pass
+
+        if tg_id:
+            _db_add_subscriber(tg_id, customer_id, sub_id)
+            invite = _tg_create_invite()
+
+            if invite:
+                _tg_send_dm(tg_id,
+                    f"🔒 *Welcome to Elite VIP!*\n\n"
+                    f"Your subscription is confirmed. Click below to join the VIP channel — "
+                    f"this link is single-use and generated just for you.\n\n"
+                    f"👉 {invite}\n\n"
+                    f"_Full picks, SGPs, and CGPs drop before every tip-off._"
+                )
+            else:
+                _tg_send_dm(tg_id,
+                    f"🔒 *Welcome to Elite VIP!*\n\n"
+                    f"Your subscription is confirmed. Reply here or contact the admin "
+                    f"to get your VIP channel access."
+                )
+
+            if admin_id:
+                _tg_send_dm(admin_id,
+                    f"✅ *New VIP Subscriber*\n"
+                    f"Telegram ID: `{tg_id}`\n"
+                    f"Customer: `{customer_id}`\n"
+                    f"Sub: `{sub_id}`\n"
+                    f"Invite {'sent ✓' if invite else 'FAILED — send manually'}"
+                )
+        else:
+            # No Telegram ID — notify admin to handle manually
+            if admin_id:
+                _tg_send_dm(admin_id,
+                    f"✅ *New VIP Subscriber (no Telegram ID captured)*\n"
+                    f"Customer: `{customer_id}`\n"
+                    f"Sub: `{sub_id}`\n"
+                    f"Ask them to message the bot to link their account."
+                )
+
+    # ── Subscription cancelled or payment failed ────────────────────────────────
+    elif etype in ("customer.subscription.deleted", "customer.subscription.paused"):
+        sub    = event["data"]["object"]
+        sub_id = sub.get("id", "")
+        tg_id  = _db_cancel_subscriber(sub_id)
+
+        if tg_id:
+            _tg_send_dm(tg_id,
+                f"👋 *VIP Access Ended*\n\n"
+                f"Your Elite VIP subscription has been cancelled. "
+                f"Your channel access has been removed.\n\n"
+                f"_To resubscribe anytime: /subscribe_"
+            )
+        if admin_id:
+            _tg_send_dm(admin_id,
+                f"⚠️ *Subscription Cancelled*\n"
+                f"Sub ID: `{sub_id}`\n"
+                f"Telegram ID: `{tg_id or 'unknown'}`"
+            )
+
+    # ── Payment failed — warn the user ─────────────────────────────────────────
+    elif etype == "invoice.payment_failed":
+        invoice     = event["data"]["object"]
+        customer_id = invoice.get("customer", "")
+        # Look up telegram_id from subscribers table by customer_id
+        tg_id = None
+        conn = _db_conn()
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT telegram_id FROM subscribers WHERE stripe_customer_id = %s LIMIT 1",
+                    (customer_id,)
+                )
+                row = cur.fetchone()
+                tg_id = row[0] if row else None
+                cur.close()
+                conn.close()
+            except Exception:
+                try: conn.close()
+                except Exception: pass
+
+        if tg_id:
+            _tg_send_dm(tg_id,
+                f"⚠️ *Payment Failed*\n\n"
+                f"We couldn't process your VIP subscription payment. "
+                f"Please update your payment method to keep your access.\n\n"
+                f"_Your access remains active during any grace period Stripe provides._"
+            )
+
+    return jsonify({"received": True}), 200
 
 
 # ── Dashboard static files ─────────────────────────────────────────────────────
