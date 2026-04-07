@@ -6467,6 +6467,27 @@ def handle_commands():
                     cmd_dbstatus(chat_id)
                 elif text == "/dbstatus":
                     reply(chat_id, "❌ Admin only.")
+                elif text == "/resendall" and str(chat_id) == str(ADMIN_ID):
+                    reply(chat_id, "♻️ Resetting today's sent flags and refiring all picks...")
+                    try:
+                        global _system_sent_date, _sgp_sent_games, _elite_props_sent_games, _cgp_sent_date
+                        _system_sent_date       = None
+                        _sgp_sent_games         = set()
+                        _elite_props_sent_games = set()
+                        _cgp_sent_date          = None
+                        save_status(0, {
+                            "_mem_system_sent_date": "",
+                            "_sgp_sent_games":       "",
+                            "_elite_props_sent_games": "",
+                            "_cgp_sent_date":        "",
+                        })
+                        reply(chat_id, "✅ Flags cleared — firing run_full_system now...")
+                        run_full_system()
+                        reply(chat_id, "✅ Resend complete.")
+                    except Exception as _rsa_err:
+                        reply(chat_id, f"❌ Resend error: {_rsa_err}")
+                elif text == "/resendall":
+                    reply(chat_id, "❌ Admin only.")
                 elif text.startswith("/analyzedrop") and str(chat_id) == str(ADMIN_ID):
                     reply(chat_id, "🔍 Analyzing bets...")
                     try:
@@ -15194,6 +15215,7 @@ def _register_commands():
         {"command": "linemonitor",    "description": "Monitor line movement"},
         {"command": "dbstatus",       "description": "DB table counts, thresholds & learning state"},
         {"command": "analyzedrop",    "description": "Analyze settled bets (/analyzedrop or /analyzedrop 50 or /analyzedrop 100-200)"},
+        {"command": "resendall",      "description": "Clear today's sent flags and refire VIP LOCK + props + SGP + CGP"},
     ]
 
     base = f"https://api.telegram.org/bot{BOT_TOKEN}"
