@@ -12311,15 +12311,16 @@ def run():
             _first_tip = _tip_times[0]
             _mins_to_first = (_first_tip - _now_utc).total_seconds() / 60
 
-            # ── Seed fetch: 3 hours before first tip of the day ──────────
+            # ── Seed fetch: 3 hours before first tip — game lines only, no props ──
+            # Props fire ONCE per day via _fire_prop_wave() at tip-2h.
+            # Pulling props here too wastes 9+ quota requests per trigger.
             if _mins_to_first <= 180 and _odds_game_fetch_date.get("early") != _today_et:
-                print(f"[Odds] Seed fetch — {_mins_to_first:.0f}min to first tip")
+                print(f"[Odds] Seed fetch — {_mins_to_first:.0f}min to first tip (game lines only)")
                 get_odds_cached(force=True)
-                get_player_props(force=True)
                 _odds_game_fetch_date["early"] = _today_et
 
-            # ── Cluster fetches: 30 min before each distinct tip cluster ─
-            # Group games tipping within 30 min of each other into one cluster.
+            # ── Cluster fetches: 30 min before each tip cluster — game lines only ─
+            # Props are already fresh from _fire_prop_wave(); no re-pull needed here.
             _clusters = []
             for _t in _tip_times:
                 if not _clusters or (_t - _clusters[-1]).total_seconds() > 1800:
@@ -12332,9 +12333,8 @@ def run():
                     _et_label = _anchor.astimezone(
                         _zi_run.ZoneInfo("America/New_York")
                     ).strftime("%-I:%M %p ET")
-                    print(f"[Odds] Cluster fetch — {_mins:.0f}min to {_et_label} tip cluster")
+                    print(f"[Odds] Cluster fetch — {_mins:.0f}min to {_et_label} (game lines only)")
                     get_odds_cached(force=True)
-                    get_player_props(force=True)
                     _game_cluster_fetched.add(_ckey)
 
             # Clear yesterday's cluster keys to avoid unbounded growth
