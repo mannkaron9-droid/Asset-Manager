@@ -14284,63 +14284,144 @@ def fits_script(leg, script):
 
 def _fits_gs(leg, gs) -> bool:
     """
-    5-dimension leg filter for SGP pool building.
+    Full 5-dimension leg filter for SGP pool building.
+    Every possible value in all 5 GameScript dimensions is explicitly handled.
 
-    Uses all dimensions from a GameScript object:
-      pace     — gates scoring OVERs/UNDERs based on possessions
-      scoring  — gates points lines based on environment
-      flow     — filters by team_role ONLY when it is explicitly known
-      offense  — (permissive — STAR_HEAVY allows role-player props)
-      defense  — blocks/steals allowed regardless of scheme
+    Dimensions:
+      1. Pace    — HALFCOURT / SLOW_PACED / AVERAGE_PACE / UPTEMPO / TRANSITION_HEAVY
+      2. Scoring — DEFENSIVE_BATTLE / NORMAL_SCORING / HIGH_SCORING / SHOOTOUT
+      3. Flow    — BLOWOUT / DOUBLE_DIGIT_LEAD / COMFORTABLE_LEAD / COMPETITIVE / TIGHT_GAME
+      4. Offense — STAR_HEAVY / BALANCED / FACILITATOR  (home AND away evaluated)
+      5. Defense — TACTICAL / PRESSURE / ZONE            (opponent defense evaluated)
 
-    Key fix vs fits_script(): team_role = "unknown"/"" is NEUTRAL — never blocks.
+    Key fix vs legacy fits_script():
+      team_role = "unknown" / "" is always NEUTRAL — never hard-blocks a leg.
+      Only explicit "favorite" / "underdog" roles trigger the flow filter.
     """
-    from bot.game_script import GameScript as _GS
-    bt        = (leg.get("bet_type") or "").lower()
-    pick_raw  = (leg.get("pick") or "OVER").upper()
-    corr      = "OVER" if "OVER" in pick_raw else ("UNDER" if "UNDER" in pick_raw else "NEUTRAL")
-    team_role = (leg.get("team_role") or "").lower()   # "favorite"/"underdog" or "" / "unknown"
-    is_known_role = team_role in ("favorite", "underdog")
+    bt         = (leg.get("bet_type") or "").lower()
+    pick_raw   = (leg.get("pick") or "OVER").upper()
+    corr       = "OVER" if "OVER" in pick_raw else ("UNDER" if "UNDER" in pick_raw else "NEUTRAL")
+    team_role  = (leg.get("team_role") or "").lower()
+    is_known   = team_role in ("favorite", "underdog")
+    is_underdog = team_role == "underdog"
+    is_starter  = leg.get("is_starter", True)
 
-    # ── Pace dimension ──────────────────────────────────────────────────────────
-    # Only block clear contradictions — don't wholesale drop entire stat classes
-    if gs.pace in ("HALFCOURT", "SLOW_PACED"):
-        # Scoring OVERs for points/threes contradict a grind game
+    try:
+        line = float(leg.get("line", 0))
+    except Exception:
+        line = 0.0
+
+    # ── 1. PACE ────────────────────────────────────────────────────────────────
+    if gs.pace == "HALFCOURT":
+        # Grind game — scoring OVERs directly contradict the pace
         if corr == "OVER" and bt in ("points", "threes"):
             return False
-    elif gs.pace in ("TRANSITION_HEAVY", "UPTEMPO"):
-        # Points/threes UNDERs contradict a shootout pace
+        # Rebounds, assists, blocks, steals, combo props all fine (physical game)
+
+    elif gs.pace == "SLOW_PACED":
+        # Similar to HALFCOURT but less extreme — only block mid-to-high lines
+        if corr == "OVER" and bt in ("points", "threes") and line >= 18:
+            return False
+
+    elif gs.pace == "AVERAGE_PACE":
+        pass  # Neutral — all prop types valid
+
+    elif gs.pace == "UPTEMPO":
+        # Fast pace — higher-line scoring UNDERs are unlikely
+        if corr == "UNDER" and bt in ("points", "threes") and line >= 15:
+            return False
+
+    elif gs.pace == "TRANSITION_HEAVY":
+        # Shootout pace — scoring UNDERs contradict the environment
         if corr == "UNDER" and bt in ("points", "threes"):
             return False
 
-    # ── Scoring environment dimension ───────────────────────────────────────────
+    # ── 2. SCORING ENVIRONMENT ─────────────────────────────────────────────────
     if gs.scoring == "DEFENSIVE_BATTLE":
-        # Only block high-line points OVERs — low lines are still fine
-        try:
-            line = float(leg.get("line", 0))
-        except Exception:
-            line = 0.0
+        # High-line points OVERs conflict with a defensive game
         if corr == "OVER" and bt == "points" and line >= 22:
             return False
-    elif gs.scoring == "SHOOTOUT":
-        # Block points UNDERs in a shootout
-        if corr == "UNDER" and bt == "points":
+        # Rebounds OVER is fine — missed shots = more boards
+
+    elif gs.scoring == "NORMAL_SCORING":
+        pass  # Neutral — all prop types valid
+
+    elif gs.scoring == "HIGH_SCORING":
+        # Scoring is elevated — block higher-line UNDERs for scoring props
+        if corr == "UNDER" and bt in ("points", "threes") and line >= 18:
             return False
 
-    # ── Flow dimension — only apply team_role filter when role is known ─────────
-    if gs.flow in ("BLOWOUT", "DOUBLE_DIGIT_LEAD") and is_known_role:
-        if team_role == "underdog":
-            is_starter = leg.get("is_starter", True)
-            # Underdog starter points/assists OVER blocked when team is blown out
-            if corr == "OVER" and is_starter and bt in ("points", "assists"):
+    elif gs.scoring == "SHOOTOUT":
+        # Maximum scoring environment — points and threes UNDERs very unlikely
+        if corr == "UNDER" and bt in ("points", "threes"):
+            return False
+
+    # ── 3. FLOW ────────────────────────────────────────────────────────────────
+    # Team-role filter applied ONLY when role is explicitly known
+    if gs.flow == "BLOWOUT":
+        # Starter underdog stars sit late — their points/assists OVERs at risk
+        if is_known and is_underdog and is_starter:
+            if corr == "OVER" and bt in ("points", "assists"):
+                return False
+        # Rebounds and combos still valid (physical game regardless of score)
+
+    elif gs.flow == "DOUBLE_DIGIT_LEAD":
+        if is_known and is_underdog and is_starter:
+            if corr == "OVER" and bt in ("points", "assists"):
                 return False
 
-    # ── Offensive style dimension ────────────────────────────────────────────────
-    # STAR_HEAVY → role-player props are still fine (benefactor effect)
-    # FACILITATOR → assists props get a pass regardless
-    # Nothing hard-blocks here — offensive style is used to boost confidence, not cut legs
+    elif gs.flow == "COMFORTABLE_LEAD":
+        # Mild mismatch — only block very high-line underdog star points OVERs
+        if is_known and is_underdog and is_starter and line >= 22:
+            if corr == "OVER" and bt == "points":
+                return False
 
-    # ── Everything else passes ───────────────────────────────────────────────────
+    elif gs.flow == "COMPETITIVE":
+        pass  # All props valid — game is even, usage is unpredictable
+
+    elif gs.flow == "TIGHT_GAME":
+        pass  # All props valid — stars shine in close games, clutch usage spikes
+
+    # ── 4. OFFENSIVE STYLE ─────────────────────────────────────────────────────
+    # Determine which team this player belongs to
+    player_team = (leg.get("team") or "").lower()
+    home_kw     = gs.home_team.split()[-1].lower() if gs.home_team else ""
+    is_home_player = bool(home_kw and home_kw in player_team)
+    off_style   = gs.offense_home if is_home_player else gs.offense_away
+
+    if off_style == "STAR_HEAVY":
+        # 1-2 players carry the load — role players can still hit via benefactor
+        # effect (star in foul trouble, B2B fatigue) — keep permissive
+        pass
+
+    elif off_style == "FACILITATOR":
+        # High-assist, ball-movement offense — assists and PRA combos very favorable
+        # Rebounds slightly less predictable (movement creates different rebound spots)
+        pass  # No hard blocks — facilitator style boosts assists confidence, not cuts legs
+
+    elif off_style == "BALANCED":
+        pass  # Multiple contributors — all stat types valid
+
+    # ── 5. DEFENSIVE STYLE (opponent's defense) ─────────────────────────────────
+    # Opponent defense = home defense if player is away, and vice versa
+    def_style = gs.defense_away if is_home_player else gs.defense_home
+
+    if def_style == "PRESSURE":
+        # Trap / press defense → turnovers → assists/steals spike, but scoring harder
+        # Block very high points lines (press disrupts offense → lower scoring)
+        if corr == "OVER" and bt == "points" and line >= 25:
+            return False
+
+    elif def_style == "ZONE":
+        # Zone defense → more mid-range + three attempts, fewer dribble-drive points
+        # Rebounds increase (more missed threes and mid-range = longer rebounds)
+        # Assists can be harder (zone collapses on passes)
+        pass  # Permissive — zone shifts play type but no prop type is outright invalid
+
+    elif def_style == "TACTICAL":
+        pass  # Structured, assignment-based defense — balanced effect on all stats
+
+    # ── Everything else passes ─────────────────────────────────────────────────
     return True
 
 
