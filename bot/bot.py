@@ -13621,15 +13621,22 @@ def send_daily_system():
                 )
             ]
             for b in todays_bets:
+                _desc = b.get("pick", "")
+                _pick_dir = "OVER" if "OVER" in _desc.upper() else ("UNDER" if "UNDER" in _desc.upper() else "OVER")
                 _todays_parlay_legs.append({
-                    "desc":        b.get("pick", ""),
-                    "confidence":  b.get("confidence", 0),
-                    "edge":        b.get("edge", 0),
+                    "desc":        _desc,
+                    "player":      b.get("player", ""),
                     "game":        b.get("game", ""),
                     "bet_type":    b.get("betType", ""),
-                    "correlation": "NEUTRAL",
+                    "line":        b.get("line", 0),
+                    "odds":        b.get("odds", -110),
+                    "pick":        _pick_dir,
+                    "confidence":  b.get("confidence", 0),
+                    "edge":        b.get("edge", 0),
+                    "correlation": _pick_dir,
                     "team":        "",
                     "team_role":   "",
+                    "position":    "",
                 })
             if _todays_parlay_legs:
                 print(f"[System] Restored {len(_todays_parlay_legs)} parlay legs from DB after restart")
