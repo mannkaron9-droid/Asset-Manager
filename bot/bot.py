@@ -14895,6 +14895,7 @@ def _register_commands():
         {"command": "calibrate",      "description": "Calibrate model"},
         {"command": "linemonitor",    "description": "Monitor line movement"},
         {"command": "dbstatus",       "description": "DB table counts, thresholds & learning state"},
+        {"command": "analyzedrop",    "description": "Analyze settled bets (/analyzedrop or /analyzedrop 50 or /analyzedrop 100-200)"},
     ]
 
     base = f"https://api.telegram.org/bot{BOT_TOKEN}"
