@@ -479,8 +479,12 @@ def build_slip_from_props(
                         adj_log.append(f"form {form_adj:+.1f}")
 
                     # 2. Historical accuracy adjustment per player
-                    #    Comes from DB — how often this player's past picks hit.
-                    hist_adj = float(stats.get("confidence_adj", 0.0))
+                    #    Uses stat-specific hit rate (e.g. points vs rebounds).
+                    try:
+                        from bot.bot import get_player_confidence_adjustment as _gca
+                        hist_adj = _gca(player, prop_type)
+                    except Exception:
+                        hist_adj = float(stats.get("confidence_adj", 0.0))
                     if hist_adj != 0.0:
                         leg.confidence = round(leg.confidence + hist_adj, 1)
                         adj_log.append(f"hist {hist_adj:+.1f}")
@@ -745,9 +749,12 @@ def get_top_candidates(
                                 base_conf = base_conf - 2.5
 
                         # ── Historical learning adjustment ────────────────
-                        # Adjusts confidence based on how accurate past picks
-                        # for this player have been. 0.0 until ≥5 picks tracked.
-                        hist_adj = float(stats.get("confidence_adj", 0.0))
+                        # Uses stat-specific hit rate (e.g. points vs rebounds).
+                        try:
+                            from bot.bot import get_player_confidence_adjustment as _gca2
+                            hist_adj = _gca2(player, prop["prop_type"])
+                        except Exception:
+                            hist_adj = float(stats.get("confidence_adj", 0.0))
                         if hist_adj != 0.0:
                             base_conf = base_conf + hist_adj
 
