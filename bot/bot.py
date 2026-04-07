@@ -8321,9 +8321,19 @@ _PROP_STD = {
 def save_bet(bet):
     # ── Pattern gate — holds picks when context pattern is weak ───────────────
     try:
-        from bot.decision_engine import gate_pick as _gate_pick
+        from bot.decision_engine import gate_pick as _gate_pick, evaluate_pick as _eval_pick
         if not _gate_pick(bet):
             return False   # PASS decision — don't save or send
+        # Write the pattern-adjusted confidence back onto the bet so the stored
+        # record and future learning cycles use the corrected value, not the raw
+        # model output.  evaluate_pick() was already called inside gate_pick —
+        # calling it once more is cheap; patterns are already in memory.
+        try:
+            _adj_conf, _ = _eval_pick(bet)
+            if _adj_conf is not None:
+                bet["confidence"] = round(_adj_conf * 100, 1)
+        except Exception as _ce:
+            print(f"[PatternConf] writeback error (non-fatal): {_ce}")
     except Exception as _ge:
         print(f"[PatternGate] gate check error (fail-open): {_ge}")
 
