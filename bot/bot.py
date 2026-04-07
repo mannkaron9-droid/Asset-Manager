@@ -14366,7 +14366,7 @@ def send_elite_player_props(game_name, game_legs):
 
     seen_picks = set()
     top_picks  = []
-    for leg in sorted(game_level_legs, key=lambda x: x.get("confidence", 0), reverse=True):
+    for leg in sorted(game_level_legs, key=lambda x: x.get("edge", 0), reverse=True):
         desc = leg.get("desc", "")
         if desc and desc not in seen_picks:
             top_picks.append(leg)
@@ -14374,10 +14374,17 @@ def send_elite_player_props(game_name, game_legs):
         if len(top_picks) >= 5:
             break
 
+    def _fmt_gl_odds(o):
+        try:
+            o = int(o)
+            return f"+{o}" if o > 0 else str(o)
+        except Exception:
+            return "-110"
+
     pick_lines = []
     for leg in top_picks:
-        conf = int(leg.get("confidence", 0))
-        pick_lines.append(f"✅ {leg['desc']} — {conf}%")
+        odds_str = _fmt_gl_odds(leg.get("odds", -110))
+        pick_lines.append(f"✅ {leg['desc']}  ({odds_str})")
 
     if not pick_lines:
         return  # nothing to send
