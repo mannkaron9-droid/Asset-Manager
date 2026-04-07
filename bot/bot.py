@@ -8011,7 +8011,7 @@ def get_player_props(force=False):
                 url = (
                     f"https://api.the-odds-api.com/v4/sports/basketball_nba"
                     f"/events/{event['id']}/odds"
-                    f"?apiKey={ODDS_API_KEY}&regions=us&markets={markets}&bookmakers=fanduel"
+                    f"?apiKey={ODDS_API_KEY}&regions=us&markets={markets}&bookmakers=fanduel&oddsFormat=american"
                 )
                 resp2 = requests.get(url, timeout=10)
                 _check_odds_quota(resp2)
@@ -11730,8 +11730,8 @@ def run_full_system():
                                     "utility_player":  [],
                                 }
                                 if prop_type in _mismatches.get(_prop_role_tag, []):
-                                    _role_mismatch_warn = " [role?]"
-                                    print(f"  [Role:{_prop_role_tag}] {player} {prop_type} advisory — mismatch tagged, pick proceeds")
+                                    _role_mismatch_warn = ""  # advisory only — not shown to users
+                                    print(f"  [Role:{_prop_role_tag}] {player} {prop_type} advisory — mismatch noted, pick proceeds")
                             except Exception:
                                 pass  # fail-open: role check is advisory
 
@@ -11778,9 +11778,11 @@ def run_full_system():
                                 _ep_win_pay = (_ep_odds / 100) if _ep_odds > 0 else (100 / abs(_ep_odds)) if _ep_odds != 0 else 0.909
                                 _ep_ev      = round((_ep_prob * _ep_win_pay) - (1 - _ep_prob), 4)
 
+                                # FanDuel-style odds display
+                                _ep_odds_disp = int(_ep_odds)
+                                _ep_odds_str  = f"+{_ep_odds_disp}" if _ep_odds_disp > 0 else str(_ep_odds_disp)
                                 elite_picks.append(
-                                    f"✅ {player} — *{pick_side} {line} {unit}*{_role_suffix}{_role_mismatch_warn}{_prop_juice_warn}\n"
-                                    f"   Prob: {_ep_prob:.1%} · Edge: {_ep_edge:+.3f} · EV implied: {_ep_implied:.1%} · Conf: {round(confidence)}%"
+                                    f"✅ {player} — *{_fd_label(prop_type, line, pick_side)}*  ({_ep_odds_str})"
                                 )
                                 all_picks.append({
                                     "game":       game,
@@ -13741,7 +13743,11 @@ def send_cgp(parlay_pool=None):
 
     def _fmt_odds_cgp(o):
         try:
-            o = int(o)
+            o = float(o)
+            if 1.01 <= o <= 30:
+                o = int(round((o - 1) * 100)) if o >= 2.0 else int(round(-100 / (o - 1)))
+            else:
+                o = int(o)
             return f"+{o}" if o > 0 else str(o)
         except Exception:
             return "-110"
@@ -13997,7 +14003,11 @@ def send_daily_system():
 
     def _fmt_lock_odds(o):
         try:
-            o = int(o)
+            o = float(o)
+            if 1.01 <= o <= 30:
+                o = int(round((o - 1) * 100)) if o >= 2.0 else int(round(-100 / (o - 1)))
+            else:
+                o = int(o)
             return f"+{o}" if o > 0 else str(o)
         except Exception:
             return "-110"
