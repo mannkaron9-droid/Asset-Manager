@@ -13174,17 +13174,25 @@ def _gs_supported_stats(gs) -> set:
 
 def _build_cross_game_parlay(pool):
     """
-    Cross Game Parlay — 3 tiers of player props across multiple games.
-    Mirrors the SGP tier system (SAFE / BALANCED / AGGRESSIVE) but cross-game.
-    Props only — TOTAL, SPREAD, and MONEYLINE legs are excluded entirely.
-    Each leg must pass its own game's script filter.
-    Each tier must span at least 2 different games.
+    Cross Game Parlay — PlayerRole + greedy selection across multiple games.
+
+    Core rules:
+    - Props only — no TOTAL / SPREAD / MONEYLINE legs
+    - Each leg filtered against its own game's dominant script
+    - PlayerRole scoring: edge × role_fit + dep_bonus (same as SGP)
+    - Cross-game conflict gate: volatile scripts (INJURY / UPSET / TRANSITION_HEAVY)
+      are capped at 1 game in SAFE, 2 in BALANCED/AGGRESSIVE — prevents stacking
+      multiple legs that all require extreme conditions simultaneously
+    - Intra-game correlation: BALANCED 2nd leg per game must have dep_bonus > 0
+      with the first (i.e. the stats must correlate inside that game)
+    - SAFE:       primary stats only · 1 leg per game  · 2-4 legs
+    - BALANCED:   primary+secondary  · 2 legs per game · 4-6 legs
+    - AGGRESSIVE: full script pool   · 3 legs per game · 6-8 legs
     Returns {"safe": [...], "balanced": [...], "aggressive": [...]}.
     """
     import random
-    from bot.game_script import analyze_game_script
 
-    # ── Props only — strip all game-level bets ────────────────────────────────
+    # ── Props only ────────────────────────────────────────────────────
     GAME_LEVEL = {"total", "spread", "moneyline", "over", "under"}
     prop_pool = [
         l for l in pool
@@ -13193,148 +13201,215 @@ def _build_cross_game_parlay(pool):
         and not l.get("desc", "").upper().startswith("SPREAD ")
         and not l.get("desc", "").upper().startswith("MONEYLINE")
     ]
-
     empty = {"safe": [], "balanced": [], "aggressive": []}
     if len(prop_pool) < 2:
         return empty
 
-    pool_sorted = sorted(prop_pool, key=lambda x: x.get("confidence", 0), reverse=True)
+    # ── Sort by edge descending, dedup by player ──────────────────────
+    pool_sorted = sorted(prop_pool, key=lambda x: x.get("edge", 0), reverse=True)
+    _seen_p: set = set()
+    _deduped: list = []
+    for _l in pool_sorted:
+        _p = (_l.get("player") or "").strip()
+        if not _p:
+            _d = _l.get("desc", "")
+            for _kw in (" OVER ", " UNDER ", " over ", " under "):
+                if _kw in _d:
+                    _p = _d[:_d.index(_kw)].strip()
+                    break
+        _pk = _p.lower() if _p else ""
+        if _pk and _pk in _seen_p:
+            continue
+        if _pk:
+            _seen_p.add(_pk)
+        _deduped.append(_l)
+    pool_sorted = _deduped
 
-    # ── Per-game: script support set + all-scripts list + combo win rates ─────
-    try:
-        _all_wr = load_learning_data().get("combo_win_rates", {})
-    except Exception:
-        _all_wr = {}
+    # ── Per-game metadata: dominant script + position lookup ──────────
+    _SS_SCORE = lambda total, spread, sc: {
+        "INJURY":            100,
+        "TRANSITION_HEAVY":  total * 0.45,
+        "UPTEMPO":           total * 0.40,
+        "BLOWOUT":           spread * 9,
+        "DOUBLE_DIGIT_LEAD": spread * 7,
+        "TIGHT_GAME":        max(0, (6 - spread)) * 12,
+        "HALFCOURT":         max(0, (215 - total)) * 0.5,
+        "SLOW_PACED":        max(0, (218 - total)) * 0.4,
+        "UPSET":             30,
+        "COMPETITIVE":       10,
+    }.get(sc, 0)
 
-    game_supported  = {}   # gname -> set of stat types supported by script
-    game_scripts    = {}   # gname -> list of script labels (multi-signal)
-
+    game_meta: dict = {}  # gname -> {dominant, pos_lookup, total, spread}
     for leg in pool_sorted:
         gname = leg.get("game", "")
-        if not gname or gname in game_supported:
+        if not gname or gname in game_meta:
             continue
         gd = _games_data.get(gname, {})
         if not gd:
             parts = gname.split(" @ ")
             if len(parts) == 2:
                 gd = _games_data.get(f"{parts[1]} @ {parts[0]}", {})
-        home   = gd.get("home_team", "")
-        away   = gd.get("away_team", "")
-        total  = float(gd.get("total", 220))
-        spread = abs(float(gd.get("spread", 5.0)))
-        try:
-            gs                  = analyze_game_script(home, away, total, spread, gname)
-            game_supported[gname] = _gs_supported_stats(gs)
-            game_scripts[gname]   = detect_all_game_scripts(gd) if gd else ["COMPETITIVE"]
-            print(f"  [CGP] {gname} → {gs.label} → {game_supported[gname]}")
-        except Exception:
-            game_supported[gname] = {"points", "rebounds", "assists", "threes"}
-            game_scripts[gname]   = ["COMPETITIVE"]
+        total  = float(gd.get("total",  220) or 220)
+        spread = abs(float(gd.get("spread", 5.0) or 5.0))
+        scripts   = detect_all_game_scripts(gd) if gd else ["COMPETITIVE"]
+        dominant  = max(scripts, key=lambda sc: _SS_SCORE(total, spread, sc))
+        pos_lookup: dict = {}
+        if " @ " in gname:
+            _aw, _hm = gname.split(" @ ", 1)
+            for _tm in (_aw.strip(), _hm.strip()):
+                try:
+                    for _s in get_team_starters_espn(_tm):
+                        _n = (_s.get("name") or "").lower()
+                        if _n:
+                            pos_lookup[_n] = _normalize_pos(_s.get("position", ""))
+                except Exception:
+                    pass
+        game_meta[gname] = {
+            "dominant":   dominant,
+            "pos_lookup": pos_lookup,
+            "total":      total,
+            "spread":     spread,
+        }
+        print(f"  [CGP] {gname} → dominant:{dominant}")
 
-    def _ensure_cross_game(tier_legs, target_size):
-        """If a tier only has legs from 1 game, pull in 1 leg from a different game."""
+    # Volatile scripts — cap at 1 game per type in SAFE
+    _VOLATILE = {"INJURY", "UPSET", "TRANSITION_HEAVY"}
+
+    # ── Position helper (per-game ESPN + BDL fallback) ────────────────
+    def _get_pos_cgp(leg):
+        pos = _normalize_pos(leg.get("position", ""))
+        if pos:
+            return pos
+        player = (leg.get("player") or "").strip()
+        if not player:
+            desc = leg.get("desc", "")
+            for kw in (" OVER ", " UNDER ", " over ", " under "):
+                if kw in desc:
+                    player = desc[:desc.index(kw)].strip()
+                    break
+        gname = leg.get("game", "")
+        pos = game_meta.get(gname, {}).get("pos_lookup", {}).get(player.lower(), "")
+        if pos:
+            return pos
+        if player:
+            pos = _resolve_position_bdl(player)
+        return pos
+
+    # ── Script filter — each leg must fit its own game's dominant script ─
+    script_pool = [
+        l for l in pool_sorted
+        if fits_script(l, game_meta.get(l.get("game", ""), {}).get("dominant", "COMPETITIVE"))
+    ]
+    if len(script_pool) < 2:
+        script_pool = pool_sorted  # graceful fallback
+
+    # ── Greedy cross-game selection ───────────────────────────────────
+    # score = edge × role_fit + dep_bonus (cross-pool dependency)
+    def _leg_score_cgp(leg, selected, role_filter, volatile_count, game_counts, max_per_game):
+        gname    = leg.get("game", "")
+        dominant = game_meta.get(gname, {}).get("dominant", "COMPETITIVE")
+
+        # Per-game cap
+        if game_counts.get(gname, 0) >= max_per_game:
+            return -1.0
+
+        # Volatile script cap (SAFE: 1 per type; BALANCED/AGGRESSIVE: 2 per type)
+        vol_cap = 1 if role_filter == "primary" else 2
+        if dominant in _VOLATILE and volatile_count.get(dominant, 0) >= vol_cap:
+            return -1.0
+
+        # Intra-game correlation gate: 2nd+ leg per game must correlate with 1st
+        if game_counts.get(gname, 0) >= 1 and role_filter != "all":
+            game_sel_types = [(s.get("bet_type") or "").lower()
+                              for s in selected if s.get("game") == gname]
+            bt = (leg.get("bet_type") or "").lower()
+            if _dep_bonus(bt, game_sel_types) == 0.0:
+                return -1.0  # no correlation — reject
+
+        bt  = (leg.get("bet_type") or "").lower()
+        pos = _get_pos_cgp(leg)
+        rf  = _role_fit_score(bt, pos)
+
+        if role_filter == "primary" and rf < 1.0:
+            return -1.0
+        if role_filter == "primary+secondary" and rf == 0.0:
+            return -1.0
+
+        sel_types = [(s.get("bet_type") or "").lower() for s in selected]
+        dep       = _dep_bonus(bt, sel_types)
+        edge      = max(leg.get("edge", 0), 0)
+        return edge * max(rf, 0.1) + dep
+
+    def _greedy_cgp(candidates, size, role_filter, max_per_game):
+        selected      = []
+        remaining     = list(candidates)
+        game_counts   = {}
+        volatile_count = {}
+        for _ in range(size):
+            if not remaining:
+                break
+            scores = [
+                (l, _leg_score_cgp(l, selected, role_filter, volatile_count, game_counts, max_per_game))
+                for l in remaining
+            ]
+            scores = [(l, s) for l, s in scores if s >= 0]
+            if not scores:
+                break
+            best = max(scores, key=lambda x: x[1])[0]
+            selected.append(best)
+            remaining.remove(best)
+            gname    = best.get("game", "")
+            dominant = game_meta.get(gname, {}).get("dominant", "COMPETITIVE")
+            game_counts[gname]      = game_counts.get(gname, 0) + 1
+            if dominant in _VOLATILE:
+                volatile_count[dominant] = volatile_count.get(dominant, 0) + 1
+        return selected
+
+    safe_size = random.randint(2, 4)
+    bal_size  = random.randint(4, 6)
+    agg_size  = random.randint(6, 8)
+
+    safe       = _greedy_cgp(script_pool, safe_size, "primary",          max_per_game=1)
+    balanced   = _greedy_cgp(script_pool, bal_size,  "primary+secondary", max_per_game=2)
+    aggressive = _greedy_cgp(script_pool, agg_size,  "all",              max_per_game=3)
+
+    # ── Fallbacks — ensure minimum viable tiers ───────────────────────
+    if len(safe) < 2:
+        safe = pool_sorted[:safe_size]
+    if len(balanced) < 4:
+        balanced = pool_sorted[:min(bal_size, len(pool_sorted))]
+    if len(aggressive) < 6:
+        aggressive = pool_sorted[:min(agg_size, len(pool_sorted))]
+
+    # ── Ensure at least 2 different games per tier ────────────────────
+    def _ensure_cross_game(tier_legs):
         games_in = {l.get("game", "") for l in tier_legs}
         if len(games_in) < 2:
-            used_descs = {l["desc"] for l in tier_legs}
-            for fallback in pool_sorted:
-                if fallback.get("game", "") not in games_in and fallback["desc"] not in used_descs:
-                    tier_legs.append(fallback)
+            used = {l["desc"] for l in tier_legs}
+            for fb in pool_sorted:
+                if fb.get("game", "") not in games_in and fb["desc"] not in used:
+                    tier_legs.append(fb)
                     break
         return tier_legs
 
-    # ── SAFE (2-4 legs): highest-confidence script-supported props, 1 per game ─
-    safe_size  = random.randint(2, 4)
-    safe_legs  = []
-    safe_games = set()
-    for leg in pool_sorted:
-        gname = leg.get("game", "")
-        bt    = leg.get("bet_type", "").lower()
-        supp  = game_supported.get(gname, {"points", "rebounds", "assists", "threes"})
-        if bt in supp and gname not in safe_games:
-            safe_legs.append(leg)
-            safe_games.add(gname)
-        if len(safe_legs) >= safe_size:
-            break
-    if len(safe_legs) < 2:
-        safe_games2 = set()
-        safe_legs   = []
-        for leg in pool_sorted:
-            if leg.get("game", "") not in safe_games2:
-                safe_legs.append(leg)
-                safe_games2.add(leg.get("game", ""))
-            if len(safe_legs) >= safe_size:
-                break
-    safe_legs = _ensure_cross_game(safe_legs, safe_size)
+    safe       = _ensure_cross_game(safe)
+    balanced   = _ensure_cross_game(balanced)
+    aggressive = _ensure_cross_game(aggressive)
 
-    # ── BALANCED (4-6 legs): multi-signal filtered, spread across games ────────
-    bal_size   = random.randint(4, 6)
-    bal_legs   = []
-    bal_games  = set()
-    bal_descs  = set()
-    for leg in pool_sorted:
-        gname   = leg.get("game", "")
-        scripts = game_scripts.get(gname, ["COMPETITIVE"])
-        allow, mult = fits_multi_script(leg, scripts, _all_wr)
-        if not allow:
-            continue
-        boosted = dict(leg)
-        boosted["confidence"] = min(98, round(leg.get("confidence", 0) * mult, 1))
-        if boosted["desc"] not in bal_descs:
-            bal_legs.append(boosted)
-            bal_games.add(gname)
-            bal_descs.add(boosted["desc"])
-        if len(bal_legs) >= bal_size:
-            break
-    if len(bal_legs) < 4:
-        # Fallback: use top confidence props spread across games
-        fb_games = set()
-        fb_descs = set()
-        bal_legs = []
-        for leg in pool_sorted:
-            gname = leg.get("game", "")
-            if leg["desc"] not in fb_descs:
-                bal_legs.append(leg)
-                fb_games.add(gname)
-                fb_descs.add(leg["desc"])
-            if len(bal_legs) >= bal_size:
-                break
-    bal_legs = _ensure_cross_game(bal_legs, bal_size)
-
-    # ── AGGRESSIVE (6-8 legs): full prop pool, spread across games ────────────
-    agg_size  = random.randint(6, 8)
-    agg_legs  = []
-    agg_games = set()
-    agg_descs = set()
-    # First pass: 1 per game
-    for leg in pool_sorted:
-        gname = leg.get("game", "")
-        if gname not in agg_games and leg["desc"] not in agg_descs:
-            agg_legs.append(leg)
-            agg_games.add(gname)
-            agg_descs.add(leg["desc"])
-        if len(agg_legs) >= agg_size:
-            break
-    # Second pass: fill remaining slots
-    for leg in pool_sorted:
-        if len(agg_legs) >= agg_size:
-            break
-        if leg["desc"] not in agg_descs:
-            agg_legs.append(leg)
-            agg_descs.add(leg["desc"])
-    if len(agg_legs) < 6:
-        agg_legs = pool_sorted[:min(agg_size, len(pool_sorted))]
-    agg_legs = _ensure_cross_game(agg_legs, agg_size)
-
-    # ── Collapse identical tiers — if BALANCED or AGGRESSIVE duplicate SAFE, clear them ──
-    safe_set = {l["desc"] for l in safe_legs}
-    bal_set  = {l["desc"] for l in bal_legs}
-    agg_set  = {l["desc"] for l in agg_legs}
+    # ── Collapse identical tiers ──────────────────────────────────────
+    safe_set = {l["desc"] for l in safe}
+    bal_set  = {l["desc"] for l in balanced}
+    agg_set  = {l["desc"] for l in aggressive}
     if bal_set == safe_set:
-        bal_legs = []
+        balanced = []
     if agg_set == safe_set or agg_set == bal_set:
-        agg_legs = []
+        aggressive = []
 
-    return {"safe": safe_legs, "balanced": bal_legs, "aggressive": agg_legs}
+    for leg in safe + balanced + aggressive:
+        print(f"  [CGP] {leg.get('game','')} · {leg.get('player', leg.get('desc',''))} · "
+              f"script={game_meta.get(leg.get('game',''), {}).get('dominant','?')}")
+
+    return {"safe": safe, "balanced": balanced, "aggressive": aggressive}
 
 
 # ==========================
@@ -13380,16 +13455,37 @@ def send_cgp(parlay_pool=None):
         print("[CGP] Not enough legs to build a cross-game parlay")
         return
 
-    EMOJI_MAP = {
-        "SPREAD": "📉", "TOTAL": "🎯", "PROP": "🏀", "MONEYLINE": "🔥",
-        "points": "🏀", "rebounds": "💪", "assists": "🔥", "threes": "🎯",
-    }
     D = "━━━━━━━━━━━━━━━━━━━"
 
+    _CGP_ICON = {
+        "points": "🏀", "rebounds": "💪", "assists": "🔥",
+        "threes": "🎯", "blocks": "🛡️", "steals": "⚡",
+    }
+
+    def _fmt_odds_cgp(o):
+        try:
+            o = int(o)
+            return f"+{o}" if o > 0 else str(o)
+        except Exception:
+            return "-110"
+
     def _ls(leg):
-        icon = EMOJI_MAP.get(leg.get("bet_type", ""), "🎯")
-        conf = int(leg.get("confidence", 0))
-        return f"  {icon} {leg['desc']} — {conf}%"
+        player = (leg.get("player") or "").strip()
+        if not player:
+            desc = leg.get("desc", "")
+            for kw in (" OVER ", " UNDER ", " over ", " under "):
+                if kw in desc:
+                    player = desc[:desc.index(kw)].strip()
+                    break
+        if not player:
+            player = leg.get("desc", "Unknown")
+        bt       = (leg.get("bet_type") or "").lower()
+        label    = _fd_label(bt, leg.get("line", 0), leg.get("pick", "OVER"))
+        odds_str = _fmt_odds_cgp(leg.get("odds", -110))
+        icon     = _CGP_ICON.get(bt, "🎯")
+        game     = leg.get("game", "")
+        game_tag = f" _{game}_" if game else ""
+        return f"  {icon} {player} — {label}  ({odds_str}){game_tag}"
 
     # ── Build CGP tiers ────────────────────────────────────────────────────────
     cgp_tiers      = _build_cross_game_parlay(parlay_pool)
@@ -13451,13 +13547,13 @@ def send_cgp(parlay_pool=None):
     for leg in all_cgp_unique.values():
         save_bet({
             "game":          leg.get("game", ""),
-            "player":        leg.get("desc", ""),
+            "player":        leg.get("player") or leg.get("desc", ""),
             "pick":          leg.get("desc", ""),
             "betType":       leg.get("bet_type", "PROP"),
             "pick_category": "CROSS_GAME_PARLAY",
-            "line":          None,
+            "line":          leg.get("line"),
             "prediction":    None,
-            "odds":          0,
+            "odds":          leg.get("odds", 0),
             "prob":          round(leg.get("confidence", 70) / 100, 4),
             "edge":          round(leg.get("edge", 0), 2),
             "confidence":    leg.get("confidence", 0),
