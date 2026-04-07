@@ -13617,7 +13617,8 @@ def send_daily_system():
                 if str(b.get("time") or "").startswith(today_str)
                 and b.get("betType", "") in (
                     "MONEYLINE", "SPREAD", "TOTAL", "OVER", "UNDER",
-                    "PROP", "points", "rebounds", "assists", "threes"
+                    "PROP", "points", "rebounds", "assists", "threes",
+                    "blocks", "steals", "pra", "pr", "pa"
                 )
             ]
             for b in todays_bets:
@@ -13709,21 +13710,47 @@ def send_daily_system():
     lock_tier, lock_units = assign_tier(vip_lock.get("confidence", 70))
     lock_badge = TIER_BADGE.get(lock_tier, "🎯 BALANCED · 2 units")
 
-    EMOJI_MAP = {
-        "SPREAD": "📉", "TOTAL": "🎯", "PROP": "🏀", "MONEYLINE": "🔥",
-        "points": "🏀", "rebounds": "💪", "assists": "🔥", "threes": "🎯",
-    }
     D = "━━━━━━━━━━━━━━━━━━━"
 
-    def _leg_line(leg):
-        icon = EMOJI_MAP.get(leg.get("bet_type", ""), "🎯")
-        return f"{icon} {leg['desc']} — {leg['confidence']}%"
+    _VL_ICON = {
+        "SPREAD": "📉", "TOTAL": "🎯", "MONEYLINE": "🔥",
+        "points": "🏀", "rebounds": "💪", "assists": "🔥",
+        "threes": "🎯", "blocks": "🛡️", "steals": "⚡",
+    }
+
+    def _fmt_lock_odds(o):
+        try:
+            o = int(o)
+            return f"+{o}" if o > 0 else str(o)
+        except Exception:
+            return "-110"
+
+    def _lock_line(leg):
+        icon     = _VL_ICON.get((leg.get("bet_type") or "").upper(), "🎯")
+        bt       = (leg.get("bet_type") or "").lower()
+        line     = leg.get("line", 0)
+        pick_dir = leg.get("pick", "OVER")
+        # Props get FanDuel label; game-level bets use desc directly
+        if bt in ("points", "rebounds", "assists", "threes", "blocks", "steals", "pra", "pr", "pa"):
+            label = _fd_label(bt, line, pick_dir)
+            player = (leg.get("player") or "").strip()
+            if not player:
+                desc = leg.get("desc", "")
+                for kw in (" OVER ", " UNDER ", " over ", " under "):
+                    if kw in desc:
+                        player = desc[:desc.index(kw)].strip()
+                        break
+            display = f"{player} — {label}" if player else leg.get("desc", "")
+        else:
+            display = leg.get("desc", "")
+        odds_str = _fmt_lock_odds(leg.get("odds", -110))
+        return f"{icon} {display}  ({odds_str})"
 
     # ── Send VIP Lock as standalone message ───────────────────────────────────
     lock_msg = "\n".join([
         f"🔒 *VIP LOCK — BEST PLAY OF THE DAY*",
         f"",
-        f"{_leg_line(vip_lock)}",
+        f"{_lock_line(vip_lock)}",
         f"{lock_badge}",
         f"⚡ Standalone only — do not parlay this",
     ])
@@ -13737,14 +13764,14 @@ def send_daily_system():
     _vl_gdata = _games_data.get(_vl_game, {})
     save_bet({
         "game":          _vl_game,
-        "player":        "",
+        "player":        vip_lock.get("player", ""),
         "pick":          vip_lock["desc"],
         "betType":       "VIP_LOCK",
         "pick_category": "VIP_LOCK",
-        "line":          None,
+        "line":          vip_lock.get("line"),
         "prediction":    None,
-        "odds":          0,
-        "prob":          0.52,
+        "odds":          vip_lock.get("odds", 0),
+        "prob":          round(vip_lock.get("confidence", 70) / 100, 4),
         "edge":          round(vip_lock.get("edge", 0), 2),
         "confidence":    vip_lock.get("confidence", 0),
         "time":          str(datetime.now()),
