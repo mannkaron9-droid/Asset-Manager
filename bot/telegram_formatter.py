@@ -65,25 +65,22 @@ LINE_BADGE = {
 
 
 def _leg_line(leg: SlipLeg, index: int) -> str:
-    """Format a single parlay leg — clean two-line format."""
+    """Format a single parlay leg — FanDuel-style, no internal model data."""
     stat_lbl = STAT_LABEL.get(leg.stat, leg.stat.upper())
     odds_str = f"+{int(leg.odds)}" if leg.odds > 0 else str(int(leg.odds))
-    conf     = round(leg.confidence)
-    ev_pct   = round(leg.ev * 100, 1)
-    ev_tag   = f"+{ev_pct}%" if ev_pct >= 0 else f"{ev_pct}%"
 
-    # Context note (one short line)
+    # Role label — short, no numbers
     if leg.is_fade:
-        note = f"Public trap · model {leg.prediction} → {leg.direction} {leg.line}"
+        note = "Public fade — value on the UNDER"
     elif leg.is_benefactor:
-        src  = leg.fade_target.split()[-1] if leg.fade_target else "fade"
-        note = f"Inherits from {src} fade · model {leg.prediction}"
+        src  = leg.fade_target.split()[-1] if leg.fade_target else "star"
+        note = f"Inherits production from {src}"
     else:
-        note = f"Clean edge · model {leg.prediction} vs line {leg.line}"
+        note = "Clean edge pick"
 
     return (
         f"{index}. *{leg.player}*  {leg.direction} {leg.line} {stat_lbl} ({odds_str})\n"
-        f"   _{note} · {conf}% conf · EV {ev_tag}_"
+        f"   _{note}_"
     )
 
 
