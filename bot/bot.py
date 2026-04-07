@@ -14869,10 +14869,13 @@ def _fd_label(prop_type: str, line, pick: str = "OVER") -> str:
     if bt in ("threes", "fg3m", "3s"): return f"{n}+ MADE THREES"
     if bt in ("blocks",  "blk"):       return f"TO RECORD {n}+ BLOCKS"
     if bt in ("steals",  "stl"):       return f"TO RECORD {n}+ STEALS"
-    if bt in ("pra",):                 return f"TO RECORD {n}+ PTS+REB+AST"
-    if bt in ("pr",):                  return f"TO RECORD {n}+ PTS+REB"
-    if bt in ("pa",):                  return f"TO RECORD {n}+ PTS+AST"
-    return f"{pick.upper()} {n}+ {prop_type.upper()}"
+    if bt in ("pra", "points_rebounds_assists", "player_points_rebounds_assists"):
+        return f"{pick.upper()} {n}+ PTS+REB+AST"
+    if bt in ("pr", "points_rebounds", "player_points_rebounds"):
+        return f"{pick.upper()} {n}+ PTS+REB"
+    if bt in ("pa", "points_assists", "player_points_assists"):
+        return f"{pick.upper()} {n}+ PTS+AST"
+    return f"{pick.upper()} {n}+ {prop_type.replace('_', '+').upper()}"
 
 
 # ── BDL position resolver (session-cached) ────────────────────────────────
@@ -15140,20 +15143,29 @@ def send_sgp_for_game(game_name, game_legs):
     agg_odds  = _parlay_odds(len(aggressive))
     D = "━━━━━━━━━━━━━━━━━━━"
 
+    # Only show tiers that genuinely add more legs than the previous tier.
+    # When the pool is small all three fallbacks slice the same list,
+    # producing three identical blocks — confusing for subscribers.
+    tier_blocks = []
+    prev_size = 0
+    for tier_label, icon, legs, odds in [
+        ("SAFE",       "🟢", safe,       safe_odds),
+        ("BALANCED",   "🟡", balanced,   bal_odds),
+        ("AGGRESSIVE", "🔴", aggressive, agg_odds),
+    ]:
+        if len(legs) > prev_size:
+            tier_blocks.append(
+                f"{icon} *{tier_label} ({len(legs)} legs) → +{odds:,}*\n"
+                + "\n".join(_ls(l) for l in legs)
+            )
+            prev_size = len(legs)
+
     msg = "\n".join([
         f"🎲 *ELITE SGP — {game_name}*",
         f"_Script: {_script_display}_",
         f"_{_script_reason}_",
         f"",
-        f"🟢 *SAFE ({len(safe)} legs) → +{safe_odds:,}*",
-        *[_ls(l) for l in safe],
-        f"",
-        f"🟡 *BALANCED ({len(balanced)} legs) → +{bal_odds:,}*",
-        *[_ls(l) for l in balanced],
-        f"",
-        f"🔴 *AGGRESSIVE ({len(aggressive)} legs) → +{agg_odds:,}*",
-        *[_ls(l) for l in aggressive],
-        f"",
+        *[f"{b}\n" for b in tier_blocks],
         D,
         f"⚡ All from same game · FanDuel · Props only",
     ])
