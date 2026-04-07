@@ -6468,22 +6468,41 @@ def handle_commands():
                 elif text == "/dbstatus":
                     reply(chat_id, "❌ Admin only.")
                 elif text == "/resendall" and str(chat_id) == str(ADMIN_ID):
-                    reply(chat_id, "♻️ Resetting today's sent flags and refiring all picks...")
+                    reply(chat_id, "♻️ Resetting all sent flags — full pipeline will refire at the normal times tonight...")
                     try:
                         global _system_sent_date, _sgp_sent_games, _elite_props_sent_games, _cgp_sent_date
-                        _system_sent_date       = None
-                        _sgp_sent_games         = set()
-                        _elite_props_sent_games = set()
-                        _cgp_sent_date          = None
+                        global _edge_fade_sent_date, _prop_wave_fired, _props_sent_today, _props_sent_date
+                        global _vip_lock_sent_date, _daily_system_sent_date
+                        _system_sent_date         = None
+                        _sgp_sent_games           = set()
+                        _elite_props_sent_games   = set()
+                        _cgp_sent_date            = None
+                        _edge_fade_sent_date      = None
+                        _prop_wave_fired          = None
+                        _props_sent_today         = set()
+                        _props_sent_date          = None
+                        try: _vip_lock_sent_date  = None
+                        except Exception: pass
+                        try: _daily_system_sent_date = None
+                        except Exception: pass
                         save_status(0, {
-                            "_mem_system_sent_date": "",
-                            "_sgp_sent_games":       "",
-                            "_elite_props_sent_games": "",
-                            "_cgp_sent_date":        "",
+                            "_mem_system_sent_date":    "",
+                            "_sgp_sent_games":          "",
+                            "_elite_props_sent_games":  "",
+                            "_cgp_sent_date":           "",
+                            "_mem_edge_fade_sent_date": "",
+                            "_ef7_sent_date":           "",
+                            "_props_date":              "",
+                            "_props_sent":              [],
                         })
-                        reply(chat_id, "✅ Flags cleared — firing run_full_system now...")
-                        run_full_system()
-                        reply(chat_id, "✅ Resend complete.")
+                        reply(chat_id,
+                            "✅ All flags cleared.\n\n"
+                            "The bot will now refire everything at the normal times:\n"
+                            "• VIP Lock + Full Card → next cycle\n"
+                            "• Edge-Fade 7 → between 2–9 PM ET\n"
+                            "• Props/SGP/CGP → tip-2h (prop wave)\n\n"
+                            "If it's after 5 PM ET and props are live, everything fires within minutes."
+                        )
                     except Exception as _rsa_err:
                         reply(chat_id, f"❌ Resend error: {_rsa_err}")
                 elif text == "/resendall":
