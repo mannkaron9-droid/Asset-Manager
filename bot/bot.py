@@ -14410,6 +14410,44 @@ def _fd_label(prop_type: str, line, pick: str = "OVER") -> str:
     return f"{pick.upper()} {n}+ {prop_type.upper()}"
 
 
+# ── BDL position resolver (session-cached) ────────────────────────────────
+_pos_bdl_cache: dict = {}  # {player_name_lower: normalized_pos}
+
+def _resolve_position_bdl(player_name: str) -> str:
+    """
+    Look up a player's position from BDL using the existing _bdl_get helper.
+    Results are cached per session so each player is only fetched once.
+    Returns a normalized position string (PG/SG/SF/PF/C) or '' if unavailable.
+    """
+    if not BDL_API_KEY or not player_name:
+        return ""
+    key = player_name.strip().lower()
+    if key in _pos_bdl_cache:
+        return _pos_bdl_cache[key]
+    try:
+        import urllib.parse as _up
+        parts = player_name.strip().split()
+        search_term = parts[0] if parts else player_name
+        url = f"{BDL_BASE}/players?search={_up.quote(search_term)}&per_page=10"
+        res = _bdl_get(url)
+        players = res.get("data", [])
+        if not players:
+            _pos_bdl_cache[key] = ""
+            return ""
+        # Prefer exact full-name match, fall back to first result
+        match = next(
+            (p for p in players if f"{p['first_name']} {p['last_name']}".lower() == key),
+            players[0]
+        )
+        pos = _normalize_pos(match.get("position", ""))
+        _pos_bdl_cache[key] = pos
+        return pos
+    except Exception as _e:
+        print(f"[BDL pos] {player_name}: {_e}")
+        _pos_bdl_cache[key] = ""
+        return ""
+
+
 def send_sgp_for_game(game_name, game_legs):
     """
     Hybrid per-game SGP — PlayerRole system + greedy sequential selection:
@@ -14502,17 +14540,26 @@ def send_sgp_for_game(game_name, game_legs):
             pass
 
     def _get_pos(leg):
+        # 1. Position already stored on the leg (from run_full_system)
         pos = _normalize_pos(leg.get("position", ""))
         if pos:
             return pos
-        player = (leg.get("player") or "").lower()
+        # Resolve player name for lookups
+        player = (leg.get("player") or "").strip()
         if not player:
             desc = leg.get("desc", "")
             for kw in (" OVER ", " UNDER ", " over ", " under "):
                 if kw in desc:
-                    player = desc[:desc.index(kw)].strip().lower()
+                    player = desc[:desc.index(kw)].strip()
                     break
-        return _pos_lookup.get(player, "")
+        # 2. ESPN starters lookup (already built from game data)
+        pos = _pos_lookup.get(player.lower(), "")
+        if pos:
+            return pos
+        # 3. BDL fallback (session-cached)
+        if player:
+            pos = _resolve_position_bdl(player)
+        return pos
 
     # ── Sort by edge descending, dedup by player ──────────────────────
     import random as _random
