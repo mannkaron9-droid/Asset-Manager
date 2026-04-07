@@ -14282,6 +14282,68 @@ def fits_script(leg, script):
     return True  # COMPETITIVE / unknown — everything passes
 
 
+def _fits_gs(leg, gs) -> bool:
+    """
+    5-dimension leg filter for SGP pool building.
+
+    Uses all dimensions from a GameScript object:
+      pace     — gates scoring OVERs/UNDERs based on possessions
+      scoring  — gates points lines based on environment
+      flow     — filters by team_role ONLY when it is explicitly known
+      offense  — (permissive — STAR_HEAVY allows role-player props)
+      defense  — blocks/steals allowed regardless of scheme
+
+    Key fix vs fits_script(): team_role = "unknown"/"" is NEUTRAL — never blocks.
+    """
+    from bot.game_script import GameScript as _GS
+    bt        = (leg.get("bet_type") or "").lower()
+    pick_raw  = (leg.get("pick") or "OVER").upper()
+    corr      = "OVER" if "OVER" in pick_raw else ("UNDER" if "UNDER" in pick_raw else "NEUTRAL")
+    team_role = (leg.get("team_role") or "").lower()   # "favorite"/"underdog" or "" / "unknown"
+    is_known_role = team_role in ("favorite", "underdog")
+
+    # ── Pace dimension ──────────────────────────────────────────────────────────
+    # Only block clear contradictions — don't wholesale drop entire stat classes
+    if gs.pace in ("HALFCOURT", "SLOW_PACED"):
+        # Scoring OVERs for points/threes contradict a grind game
+        if corr == "OVER" and bt in ("points", "threes"):
+            return False
+    elif gs.pace in ("TRANSITION_HEAVY", "UPTEMPO"):
+        # Points/threes UNDERs contradict a shootout pace
+        if corr == "UNDER" and bt in ("points", "threes"):
+            return False
+
+    # ── Scoring environment dimension ───────────────────────────────────────────
+    if gs.scoring == "DEFENSIVE_BATTLE":
+        # Only block high-line points OVERs — low lines are still fine
+        try:
+            line = float(leg.get("line", 0))
+        except Exception:
+            line = 0.0
+        if corr == "OVER" and bt == "points" and line >= 22:
+            return False
+    elif gs.scoring == "SHOOTOUT":
+        # Block points UNDERs in a shootout
+        if corr == "UNDER" and bt == "points":
+            return False
+
+    # ── Flow dimension — only apply team_role filter when role is known ─────────
+    if gs.flow in ("BLOWOUT", "DOUBLE_DIGIT_LEAD") and is_known_role:
+        if team_role == "underdog":
+            is_starter = leg.get("is_starter", True)
+            # Underdog starter points/assists OVER blocked when team is blown out
+            if corr == "OVER" and is_starter and bt in ("points", "assists"):
+                return False
+
+    # ── Offensive style dimension ────────────────────────────────────────────────
+    # STAR_HEAVY → role-player props are still fine (benefactor effect)
+    # FACILITATOR → assists props get a pass regardless
+    # Nothing hard-blocks here — offensive style is used to boost confidence, not cut legs
+
+    # ── Everything else passes ───────────────────────────────────────────────────
+    return True
+
+
 def fits_multi_script(leg, scripts, combo_win_rates=None):
     """
     Evaluate a leg against ALL matching scripts for a game.
@@ -14997,6 +15059,14 @@ def send_sgp_for_game(game_name, game_legs):
         _away = _away.strip(); _home = _home.strip()
     else:
         _away, _home = "Away", "Home"
+
+    # ── Full 5-dimension GameScript (pace + flow + scoring + offense + defense) ─
+    try:
+        from bot.game_script import analyze_game_script as _ags
+        _gs = _ags(_home, _away, total, spread, game_name)
+    except Exception:
+        _gs = None
+
     _pos_lookup: dict = {}
     for _team in (_away, _home):
         try:
@@ -15052,10 +15122,15 @@ def send_sgp_for_game(game_name, game_legs):
         _deduped.append(_leg)
     pool_sorted = _deduped
 
-    # ── Script filter — all legs must fit the dominant script story ───
-    script_pool = [l for l in pool_sorted if fits_script(l, dominant_script)]
+    # ── Script filter — use full 5-dimension GameScript if available ──
+    # Falls back to the legacy single-dimension fits_script only if the
+    # GameScript object could not be built (import error / missing data).
+    if _gs is not None:
+        script_pool = [l for l in pool_sorted if _fits_gs(l, _gs)]
+    else:
+        script_pool = [l for l in pool_sorted if fits_script(l, dominant_script)]
     if len(script_pool) < 2:
-        script_pool = pool_sorted  # graceful fallback
+        script_pool = pool_sorted  # graceful fallback when filter is too aggressive
 
     # ── Greedy sequential selection ───────────────────────────────────
     # score = edge × role_fit + dependency_bonus
@@ -15160,11 +15235,41 @@ def send_sgp_for_game(game_name, game_legs):
             )
             prev_size = len(legs)
 
-    msg = "\n".join([
+    # ── Build context line from full GameScript if available ──────────
+    if _gs is not None:
+        _PACE_ICONS = {
+            "HALFCOURT": "⚫ Halfcourt", "SLOW_PACED": "⚫ Slow",
+            "AVERAGE_PACE": "📊 Average", "UPTEMPO": "🟡 Uptempo",
+            "TRANSITION_HEAVY": "🟡 Transition",
+        }
+        _FLOW_ICONS = {
+            "BLOWOUT": "🟢 Blowout", "DOUBLE_DIGIT_LEAD": "🟢 DDL",
+            "COMFORTABLE_LEAD": "🟩 Comfortable", "COMPETITIVE": "🔵 Competitive",
+            "TIGHT_GAME": "🔵 Tight",
+        }
+        _SCORING_ICONS = {
+            "DEFENSIVE_BATTLE": "🛡️ Defensive", "NORMAL_SCORING": "📊 Normal",
+            "HIGH_SCORING": "🔥 High Scoring", "SHOOTOUT": "🔥 Shootout",
+        }
+        _pace_str    = _PACE_ICONS.get(_gs.pace, _gs.pace)
+        _flow_str    = _FLOW_ICONS.get(_gs.flow, _gs.flow)
+        _scoring_str = _SCORING_ICONS.get(_gs.scoring, _gs.scoring)
+        _context_line = f"_{_pace_str} · {_flow_str} · {_scoring_str}_"
+        _reason_line  = f"_{_script_reason}_" if _script_reason else ""
+    else:
+        _context_line = f"_Script: {_script_display}_"
+        _reason_line  = f"_{_script_reason}_" if _script_reason else ""
+
+    _header_lines = [
         f"🎲 *ELITE SGP — {game_name}*",
-        f"_Script: {_script_display}_",
-        f"_{_script_reason}_",
-        f"",
+        _context_line,
+    ]
+    if _reason_line:
+        _header_lines.append(_reason_line)
+    _header_lines.append("")
+
+    msg = "\n".join([
+        *_header_lines,
         *[f"{b}\n" for b in tier_blocks],
         D,
         f"⚡ All from same game · FanDuel · Props only",
