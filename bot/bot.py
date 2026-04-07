@@ -622,15 +622,18 @@ def _run_line_monitor_loop(
                 # Pull real data every cycle — same signals the main engine uses
                 try:
                     _lm_injuries = get_espn_injuries()
-                except Exception:
+                except Exception as _e:
+                    print(f"[live_monitor] get_espn_injuries failed: {_e}")
                     _lm_injuries = {}
                 try:
                     _lm_inj_boost = assess_injury_boost(_lm_injuries, odds)
-                except Exception:
+                except Exception as _e:
+                    print(f"[live_monitor] assess_injury_boost failed: {_e}")
                     _lm_inj_boost = {}
                 try:
                     _lm_b2b = detect_back_to_back_teams()
-                except Exception:
+                except Exception as _e:
+                    print(f"[live_monitor] detect_back_to_back_teams failed: {_e}")
                     _lm_b2b = set()
 
                 _load_and_apply_team_styles()
@@ -1453,20 +1456,20 @@ def _get_engine_candidates(filtered_props, all_props, game_data, ht, at, top_n=1
     injuries = {}
     try:
         injuries = get_espn_injuries()
-    except Exception:
-        pass
+    except Exception as _e:
+        print(f"[_get_engine_candidates] get_espn_injuries failed: {_e}")
 
     inj_boost = {}
     try:
         inj_boost = assess_injury_boost(injuries, filtered_props if filtered_props else all_props)
-    except Exception:
-        pass
+    except Exception as _e:
+        print(f"[_get_engine_candidates] assess_injury_boost failed: {_e}")
 
     b2b = set()
     try:
         b2b = detect_back_to_back_teams()
-    except Exception:
-        pass
+    except Exception as _e:
+        print(f"[_get_engine_candidates] detect_back_to_back_teams failed: {_e}")
 
     props = filtered_props if filtered_props else all_props
     gkey1 = f"{ht} vs {at}"
@@ -1517,8 +1520,8 @@ def _get_engine_candidates(filtered_props, all_props, game_data, ht, at, top_n=1
                     }
                     for l in slip.legs
                 ]
-        except Exception:
-            pass
+        except Exception as _e:
+            print(f"[_get_engine_candidates] build_slip_from_props failed for {ht} vs {at}: {_e}")
 
     # ── ESPN fallback: build from starters when bookmaker props aren't posted yet ──
     # get_team_starters_espn already returns pred_pts/reb/ast/fg3 — no extra API calls.
@@ -1567,15 +1570,17 @@ def _get_engine_candidates(filtered_props, all_props, game_data, ht, at, top_n=1
 
 
 def _leg_fmt(c, game_tag=""):
-    """Format a single candidate leg for Telegram output."""
-    conf     = int(c.get("confidence", 0))
-    role     = c.get("role", "")
-    role_tag = f" [{role.upper()}]" if role else ""
-    desc     = f"{c.get('player','?')} {c.get('pick','?')} {c.get('line','?')} {c.get('prop_type','')}"
+    """Format a single candidate leg for Telegram output — FanDuel format only."""
+    bet_type = (c.get("prop_type") or c.get("bet_type") or "").lower()
+    line     = c.get("line", "?")
+    pick     = (c.get("pick") or "OVER").upper()
+    player   = c.get("player", "?")
     odds_raw = c.get("odds", "")
+    # Build FanDuel-style label (e.g. "OVER 25.5 PTS (-110)")
+    label    = _fd_label(bet_type, line, pick) if bet_type else f"{pick} {line}"
     odds_tag = f" ({odds_raw})" if odds_raw else ""
     g_tag    = f" [{game_tag}]" if game_tag else ""
-    return f"  {desc.strip()}{odds_tag}{role_tag}{g_tag} — {conf}%"
+    return f"  {player} — {label}{odds_tag}{g_tag}"
 
 
 def _collect_unique_games(teams, games_raw):
@@ -1834,8 +1839,8 @@ def cmd_sgp(chat_id, raw_teams_text):
                     _label2 = f"{ht2.split()[-1]} vs {at2.split()[-1]}"
                     _n = _save_pick_legs_to_bets(_cands2, "SGP", _label2, _ts)
                     print(f"[cmd_sgp] Saved {_n} legs to bets: {_label2}")
-                except Exception:
-                    pass
+                except Exception as _se2:
+                    print(f"[cmd_sgp] per-game save failed for {_label2}: {_se2}")
         except Exception as _se:
             print(f"[cmd_sgp] save error: {_se}")
 
@@ -1885,11 +1890,25 @@ def cmd_parlay(chat_id, raw_teams_text):
             filtered = _filter_props_for_game(ht, at, all_props)
             try:
                 cands = _get_engine_candidates(filtered, all_props, game_data, ht, at, top_n=10)
-                for c in cands:
-                    c["_game"] = f"{ht.split()[-1]} vs {at.split()[-1]}"
-                all_cands.extend(cands)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[cmd_parlay] _get_engine_candidates failed for {ht} vs {at}: {e}")
+                cands = []
+
+            # Apply 5-dimension GameScript filter per game before pooling
+            try:
+                from bot.game_script import analyze_game_script as _pl_ags
+                _pl_gs = _pl_ags(ht, at,
+                                 float(game_data.get("total", 220) or 220),
+                                 abs(float(game_data.get("spread", 5.0) or 5.0)))
+                _gs_filtered = [c for c in cands if _fits_gs(c, _pl_gs)]
+                if len(_gs_filtered) >= 2:
+                    cands = _gs_filtered
+            except Exception as e:
+                print(f"[cmd_parlay] GameScript filter failed for {ht} vs {at}: {e}")
+
+            for c in cands:
+                c["_game"] = f"{ht.split()[-1]} vs {at.split()[-1]}"
+            all_cands.extend(cands)
 
         if not all_cands:
             reply(chat_id, "⚠️ No picks cleared for these games — props or stats may not be available yet.")
@@ -14285,13 +14304,15 @@ def fits_script(leg, script):
             if corr == "OVER" and not is_starter:
                 return True      # underdog bench player gets extra minutes → OVER valid
             return False
-        return False
+        # team_role unknown/unset → treat as neutral, do not hard-block
+        return True
 
     # ── TIGHT_GAME / COMPETITIVE: Back & forth — star OVERs, clutch props
     if script in ("TIGHT_GAME", "COMPETITIVE"):
         if corr == "UNDER" and bet_type not in ("rebounds",):
             return False
-        return bet_type in ("SPREAD", "TOTAL", "points", "assists")
+        # rebounds valid in close games (both teams fighting the glass), threes/assists also live
+        return bet_type in ("SPREAD", "TOTAL", "points", "assists", "rebounds", "threes", "3PM")
 
     # ── UPSET: Underdog alive — underdog legs + fav star forced to carry
     if script == "UPSET":
@@ -14300,6 +14321,9 @@ def fits_script(leg, script):
         if corr == "OVER" and bet_type in ("points", "assists") and team_role == "favorite":
             return True          # fav star forced to carry = points/assists over
         if bet_type in ("MONEYLINE",):
+            return True
+        # team_role unknown/unset → allow OVERs on scoring stats (conservative pass)
+        if not team_role and corr == "OVER" and bet_type in ("points", "assists"):
             return True
         return False
 
@@ -14465,63 +14489,6 @@ def _fits_gs(leg, gs) -> bool:
 
     # ── Everything else passes ─────────────────────────────────────────────────
     return True
-
-
-def fits_multi_script(leg, scripts, combo_win_rates=None):
-    """
-    Evaluate a leg against ALL matching scripts for a game.
-
-    Returns (allow: bool, confidence_multiplier: float)
-
-    Rules:
-      - SAFE tier always passes — multiplier = 1.0
-      - COMPETITIVE only → passes with multiplier = 1.0
-      - If ANY non-COMPETITIVE script hard-blocks → skip (False, 1.0)
-      - If all non-COMPETITIVE scripts approve → fire; multiplier based on:
-            * Number of agreeing signals (+5% per extra script)
-            * Learned combo win rate once >= 5 samples exist
-      - If no non-COMPETITIVE script has an opinion → pass at 1.0 (abstention)
-    """
-    if not scripts or scripts == ["COMPETITIVE"]:
-        return True, 1.0
-
-    non_normal = [sc for sc in scripts if sc != "COMPETITIVE"]
-    if not non_normal:
-        return True, 1.0
-
-    decisions = {sc: fits_script(leg, sc) for sc in non_normal}
-    blocks    = [sc for sc, ok in decisions.items() if not ok]
-    approvals = [sc for sc, ok in decisions.items() if ok]
-
-    key = combo_key(scripts)
-    cwr = (combo_win_rates or {}).get(key)
-
-    # ── Conflict: at least one script blocks ─────────────────────────
-    if blocks:
-        # Default: block the pick
-        # Exception: enough data proves this conflict combination is actually profitable
-        # Requires 10+ graded results AND win rate >= 55% to unlock
-        if cwr and cwr.get("n", 0) >= 10:
-            wr = cwr["w"] / cwr["n"]
-            if wr >= 0.55:
-                # Conflict unlocked by data — fire at reduced confidence (conflict penalty)
-                conflict_penalty = round(1.0 - (len(blocks) * 0.10), 2)   # -10% per blocking script
-                conflict_penalty = max(0.70, conflict_penalty)             # floor at -30%
-                return True, conflict_penalty
-        # Not enough data or win rate too low — keep blocking
-        return False, 1.0
-
-    # ── All scripts approve — build confidence multiplier ────────────
-    if cwr and cwr.get("n", 0) >= 5:
-        wr         = cwr["w"] / cwr["n"]
-        # Win rate below 40% → dampen confidence; above 50% → boost
-        multiplier = round(1.0 + (wr - 0.50) * 1.5, 2)
-        multiplier = max(0.75, min(1.40, multiplier))   # cap between -25% and +40%
-    else:
-        # No history yet: small raw bonus per extra agreeing signal
-        multiplier = round(1.0 + (len(approvals) - 1) * 0.05, 2)
-
-    return True, multiplier
 
 
 def send_edge_fade_parlay(parlay_pool, bankroll=1000, swap_threshold=0.05,
