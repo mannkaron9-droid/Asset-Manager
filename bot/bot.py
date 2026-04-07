@@ -10337,8 +10337,8 @@ def retrain_from_results():
     # ── 8. Retrain sklearn player model ──────────────────────────
     X, y = [], []
     for b in settled:
-        edge = b.get("edge", 0)
-        prob = b.get("prob", 0.5)
+        edge = b.get("edge") or 0
+        prob = b.get("prob") or 0.5
         pred = b.get("prediction") or 0
         line = b.get("line") or 0
         X.append([float(edge), float(prob), float(pred), float(line)])
