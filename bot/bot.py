@@ -13076,23 +13076,14 @@ def run():
                 if ml:
                     w = ml["winner"].split()[-1]
                     w_odds = f"{ml['odds']:+.0f}" if ml.get("odds") else ""
-                    opp_odds = (a_ml_s if w == h_short else h_ml_s)
-                    opp_str = f"  ·  opp {opp_odds}" if opp_odds else ""
-                    prob_str = f"  ·  {ml['win_prob']}%" if ml.get("win_prob") else ""
-                    edge_str = f"  ·  edge {ml['edge_pct']}%" if ml.get("edge_pct") else ""
-                    card_lines.append(
-                        f"💰 *{w}* ML {w_odds}{opp_str}{prob_str}{edge_str}"
-                    )
+                    card_lines.append(f"💰 *{w}* ML {w_odds}")
                 if spr:
                     card_lines.append(
                         f"📉 *{spr['cover_team'].split()[-1]} {spr['spread_str']}* to cover"
-                        f"  ·  Edge {spr['edge']} pts"
                     )
                 if tot:
-                    sharp_str = f"  ·  {tot['sharp']}" if tot.get("sharp") else ""
                     card_lines.append(
                         f"🎯 *{tot['side']} {tot['line']}*"
-                        f"  ·  Model {tot['model']}{sharp_str}"
                     )
                 card_lines.append("")
 
@@ -13825,7 +13816,7 @@ def send_cgp(parlay_pool=None):
     # ── Free channel teaser — first 2 SAFE legs only ──────────────────────────
     if cgp_safe:
         teaser_legs  = cgp_safe[:2]
-        teaser_lines = "\n".join([f"  {l['desc']}" for l in teaser_legs])
+        teaser_lines = "\n".join([_ls(l) for l in teaser_legs])
         n_more       = max((len(cgp_safe) - 2) + len(cgp_balanced) + len(cgp_aggressive), 0)
         free_msg = (
             f"🌐 *FREE PLAY — CROSS GAME PARLAY*\n\n"
