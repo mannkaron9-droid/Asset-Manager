@@ -1793,13 +1793,30 @@ def cmd_sgp(chat_id, raw_teams_text):
                 lines.append("  ⚠️ No picks cleared for this game — props or stats may not be available yet.")
                 continue
 
+            # Apply 5-dimension GameScript filter on candidates
+            try:
+                from bot.game_script import analyze_game_script as _cmd_ags
+                _cmd_gs = _cmd_ags(ht, at,
+                                   float(game_data.get("total", 220) or 220),
+                                   abs(float(game_data.get("spread", 5.0) or 5.0)))
+                _filtered_cands = [c for c in cands if _fits_gs(c, _cmd_gs)]
+                if len(_filtered_cands) < 2:
+                    _filtered_cands = cands  # fallback to full candidate list
+            except Exception:
+                _filtered_cands = cands
+
+            # Only show tiers that genuinely add more legs than the previous
+            _prev_n = 0
             for tier_name, icon, n in [("SAFE", "🟢", 3), ("BALANCED", "🟡", 5), ("AGGRESSIVE", "🔴", 7)]:
-                legs = cands[:n]
+                legs = _filtered_cands[:n]
+                if len(legs) <= _prev_n:
+                    continue  # skip identical tier
                 odds = _parlay_odds(len(legs))
                 lines.append(f"\n  {icon} *{tier_name} — {len(legs)} LEG*")
                 for c in legs:
                     lines.append(_leg_fmt(c))
                 lines.append(f"  📊 Est. +{odds:,}")
+                _prev_n = len(legs)
 
         lines += ["", D_LINE, f"_Requested · {_et_time_str()}_"]
         reply(chat_id, "\n".join(lines))
@@ -4994,18 +5011,27 @@ def _generate_shadow_picks(game_id, home_team, away_team, game_date):
         if len(_shadow_pass_legs) >= 2:
             import random as _sr
 
-            # Script filter — same as send_sgp_for_game
-            _shd_scripts = detect_all_game_scripts({
-                "home": home_team, "away": away_team,
-                "total": _shd_vegas_total or pred_total,
-                "spread": 0,
-            })
-            _shd_dom = max(_shd_scripts, key=lambda sc: {
-                "INJURY": 100, "TRANSITION_HEAVY": (_shd_vegas_total or pred_total) * 0.45,
-                "UPTEMPO": (_shd_vegas_total or pred_total) * 0.40,
-            }.get(sc, 0)) if _shd_scripts else "COMPETITIVE"
+            # Script filter — full 5-dimension GameScript (same engine as SGP/CGP)
+            _shd_total  = float(_shd_vegas_total or pred_total or 220)
+            _shd_spread = float(_games_data.get(
+                f"{away_team} @ {home_team}", _games_data.get(
+                f"{home_team} @ {away_team}", {})).get("spread", 0) or 0)
+            _shd_gs = None
+            try:
+                from bot.game_script import analyze_game_script as _shd_ags
+                _shd_gs = _shd_ags(home_team, away_team, _shd_total, abs(_shd_spread))
+            except Exception:
+                pass
 
-            _shd_script_pool = [l for l in _shadow_pass_legs if fits_script(l, _shd_dom)]
+            if _shd_gs is not None:
+                _shd_script_pool = [l for l in _shadow_pass_legs if _fits_gs(l, _shd_gs)]
+            else:
+                _shd_scripts = detect_all_game_scripts({"total": _shd_total, "spread": _shd_spread})
+                _shd_dom = max(_shd_scripts, key=lambda sc: {
+                    "INJURY": 100, "TRANSITION_HEAVY": _shd_total * 0.45,
+                    "UPTEMPO": _shd_total * 0.40,
+                }.get(sc, 0)) if _shd_scripts else "COMPETITIVE"
+                _shd_script_pool = [l for l in _shadow_pass_legs if fits_script(l, _shd_dom)]
             if len(_shd_script_pool) < 2:
                 _shd_script_pool = _shadow_pass_legs
 
@@ -13584,11 +13610,21 @@ def _build_cross_game_parlay(pool):
                             pos_lookup[_n] = _normalize_pos(_s.get("position", ""))
                 except Exception:
                     pass
+        # Build full 5-dimension GameScript for this game
+        _cgp_gs = None
+        if " @ " in gname:
+            try:
+                from bot.game_script import analyze_game_script as _cgp_ags
+                _cgp_aw, _cgp_hm = gname.split(" @ ", 1)
+                _cgp_gs = _cgp_ags(_cgp_hm.strip(), _cgp_aw.strip(), total, spread, gname)
+            except Exception:
+                pass
         game_meta[gname] = {
             "dominant":   dominant,
             "pos_lookup": pos_lookup,
             "total":      total,
             "spread":     spread,
+            "_gs":        _cgp_gs,
         }
         print(f"  [CGP] {gname} → dominant:{dominant}")
 
@@ -13615,11 +13651,17 @@ def _build_cross_game_parlay(pool):
             pos = _resolve_position_bdl(player)
         return pos
 
-    # ── Script filter — each leg must fit its own game's dominant script ─
-    script_pool = [
-        l for l in pool_sorted
-        if fits_script(l, game_meta.get(l.get("game", ""), {}).get("dominant", "COMPETITIVE"))
-    ]
+    # ── Script filter — each leg filtered against its own game's full GameScript ─
+    def _cgp_fits(leg):
+        gname = leg.get("game", "")
+        meta  = game_meta.get(gname, {})
+        _gs   = meta.get("_gs")
+        if _gs is not None:
+            return _fits_gs(leg, _gs)
+        # Fallback: legacy single-dimension filter
+        return fits_script(leg, meta.get("dominant", "COMPETITIVE"))
+
+    script_pool = [l for l in pool_sorted if _cgp_fits(l)]
     if len(script_pool) < 2:
         script_pool = pool_sorted  # graceful fallback
 
