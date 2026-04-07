@@ -14975,7 +14975,8 @@ def send_sgp_for_game(game_name, game_legs):
             pos = _resolve_position_bdl(player)
         return pos
 
-    # ── Sort by edge descending, dedup by player ──────────────────────
+    # ── Sort by edge descending, dedup by player+stat (not player-only) ──
+    # Allows multiple props per player (e.g. Carter rebounds + Carter points)
     import random as _random
     pool_sorted = sorted(pool, key=lambda x: x.get("edge", 0), reverse=True)
     _seen: set = set()
@@ -14988,7 +14989,8 @@ def send_sgp_for_game(game_name, game_legs):
                 if _kw in _d:
                     _p = _d[:_d.index(_kw)].strip()
                     break
-        _pk = _p.lower() if _p else ""
+        _bt = ((_leg.get("bet_type") or _leg.get("betType") or "")).lower()
+        _pk = f"{_p.lower()}|{_bt}" if _p else ""
         if _pk and _pk in _seen:
             continue
         if _pk:
@@ -15052,7 +15054,16 @@ def send_sgp_for_game(game_name, game_legs):
 
     def _fmt_odds(o):
         try:
-            o = int(o)
+            o = float(o)
+            # Decimal odds detection: valid American odds are >= 100 or <= -100
+            # Decimal format (e.g. 1.909, 2.0, 2.5) falls in range 1.01–30
+            if 1.01 <= o <= 30:
+                if o >= 2.0:
+                    o = int(round((o - 1) * 100))   # 2.0 → +100, 2.5 → +150
+                else:
+                    o = int(round(-100 / (o - 1)))  # 1.5 → -200, 1.91 → -110
+            else:
+                o = int(o)
             return f"+{o}" if o > 0 else str(o)
         except Exception:
             return "-110"
