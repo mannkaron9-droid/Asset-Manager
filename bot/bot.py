@@ -11994,8 +11994,8 @@ def run_edge_fade_7():
 
     today_str = et_now.strftime("%Y-%m-%d")
 
-    # Fire between 2 PM and 9 PM ET — props are live before tip-offs
-    if not (14 <= et_now.hour < 21):
+    # Fire only when games are on the schedule (dynamic window — works for any tip time)
+    if not _in_game_window():
         return
 
     if _edge_fade_sent_date == today_str:
@@ -13177,8 +13177,8 @@ def send_avoid_list():
     if _avoid_sent_date == today_str:
         return
 
-    # Only fire between 2 PM and 8 PM ET (before evening games)
-    if not (14 <= et_now.hour < 20):
+    # Fire only when games are scheduled today (dynamic — handles afternoon + late games)
+    if not _in_game_window():
         return
 
     # Need at least one game within 3 hours
