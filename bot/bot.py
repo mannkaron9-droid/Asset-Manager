@@ -258,6 +258,7 @@ def _db_init():
         cur.execute("ALTER TABLE shadow_picks ADD COLUMN IF NOT EXISTS role_tag    TEXT DEFAULT NULL")
         cur.execute("ALTER TABLE shadow_picks ADD COLUMN IF NOT EXISTS prob        FLOAT DEFAULT NULL")
         cur.execute("ALTER TABLE shadow_picks ADD COLUMN IF NOT EXISTS implied_prob FLOAT DEFAULT NULL")
+        cur.execute("ALTER TABLE shadow_picks ADD COLUMN IF NOT EXISTS parlay_id   TEXT DEFAULT NULL")
 
         # ── Causality event log (survives restart/error — feeds self-learning) ─
         cur.execute("""
@@ -327,6 +328,7 @@ _cmd_offset            = 0      # Telegram getUpdates offset
 _avoid_sent_date       = None   # date string when avoid list was last sent
 _vip_lock_desc         = None   # desc of today's VIP LOCK (excluded from SGPs)
 _sgp_sent_games        = set()  # game names that already got an SGP post today
+_shadow_cgp_dates      = set()  # dates where shadow CGP has already been generated
 _elite_props_sent_games = set() # game names that already got Elite Props post today
 _cgp_sent_date         = None   # date string when CGP was last sent (once per day)
 _games_data            = {}     # game_name -> {total, spread} for script detection
@@ -4046,6 +4048,11 @@ def _watch_all_live_games():
                     _grade_shadow_picks_for_game(game_id, today)
                 except Exception as _gg_err:
                     print(f"[Shadow] grade error game {game_id}: {_gg_err}")
+                # Shadow CGP — build once per day on first Final (cross-game pool ready)
+                try:
+                    _generate_shadow_cgp(today)
+                except Exception as _scgp_err:
+                    print(f"[ShadowCGP] trigger error: {_scgp_err}")
 
             # ── Player box scores for this game (ESPN summary) ───────────────
             pstats = _espn_summary_player_stats(game_id)
@@ -4620,6 +4627,7 @@ def _generate_shadow_picks(game_id, home_team, away_team, game_date):
     picks_stored = 0
     passed   = 0
     blocked  = 0
+    _shadow_pass_legs = []   # legs that passed all layers — used for shadow SGP
 
     # ── Starters ──────────────────────────────────────────────────────────────
     home_starters = get_team_starters_espn(home_team)
@@ -4814,6 +4822,17 @@ def _generate_shadow_picks(game_id, home_team, away_team, game_date):
                     blocked += 1
                 else:
                     passed += 1
+                    _shadow_pass_legs.append({
+                        "player":   pname,
+                        "bet_type": prop_type,
+                        "line":     real_line,
+                        "odds":     real_odds,
+                        "pick":     pick_dir.upper(),
+                        "edge":     shd_edge,
+                        "prob":     shd_prob,
+                        "position": role_tag or "",
+                        "game":     f"{away_team} @ {home_team}",
+                    })
             except Exception as e:
                 print(f"[Shadow] prop insert error {pname}/{prop_type}: {e}")
 
@@ -4970,6 +4989,106 @@ def _generate_shadow_picks(game_id, home_team, away_team, game_date):
     except Exception as e:
         print(f"[Shadow] total insert error: {e}")
 
+    # ── Shadow SGP — greedy selection on passing legs ─────────────────────────
+    try:
+        if len(_shadow_pass_legs) >= 2:
+            import random as _sr
+
+            # Script filter — same as send_sgp_for_game
+            _shd_scripts = detect_all_game_scripts({
+                "home": home_team, "away": away_team,
+                "total": _shd_vegas_total or pred_total,
+                "spread": 0,
+            })
+            _shd_dom = max(_shd_scripts, key=lambda sc: {
+                "INJURY": 100, "TRANSITION_HEAVY": (_shd_vegas_total or pred_total) * 0.45,
+                "UPTEMPO": (_shd_vegas_total or pred_total) * 0.40,
+            }.get(sc, 0)) if _shd_scripts else "COMPETITIVE"
+
+            _shd_script_pool = [l for l in _shadow_pass_legs if fits_script(l, _shd_dom)]
+            if len(_shd_script_pool) < 2:
+                _shd_script_pool = _shadow_pass_legs
+
+            def _shd_leg_score(leg, selected, role_filter):
+                bt  = (leg.get("bet_type") or "").lower()
+                pos = _normalize_pos(leg.get("position", ""))
+                rf  = _role_fit_score(bt, pos)
+                if role_filter == "primary" and rf < 1.0:
+                    return -1.0
+                if role_filter == "primary+secondary" and rf == 0.0:
+                    return -1.0
+                sel_types = [(s.get("bet_type") or "").lower() for s in selected]
+                dep       = _dep_bonus(bt, sel_types)
+                edge      = max(leg.get("edge", 0), 0)
+                return edge * max(rf, 0.1) + dep
+
+            def _shd_greedy(candidates, size, role_filter):
+                selected  = []
+                remaining = list(candidates)
+                for _ in range(size):
+                    if not remaining:
+                        break
+                    scores = [(l, _shd_leg_score(l, selected, role_filter)) for l in remaining]
+                    scores = [(l, s) for l, s in scores if s >= 0]
+                    if not scores:
+                        break
+                    best = max(scores, key=lambda x: x[1])[0]
+                    selected.append(best)
+                    remaining.remove(best)
+                return selected
+
+            for tier, role_filter, size_range in [
+                ("sgp_safe",       "primary",           (2, 4)),
+                ("sgp_balanced",   "primary+secondary", (4, 6)),
+                ("sgp_aggressive", "all",               (6, 8)),
+            ]:
+                _sz   = _sr.randint(*size_range)
+                _legs = _shd_greedy(_shd_script_pool, _sz, role_filter)
+                if len(_legs) < 2:
+                    continue
+                _pid = f"{tier}_{game_id}"
+                for _sl in _legs:
+                    _sl_stat = (_sl.get("bet_type") or "").lower()
+                    _sl_pick = (_sl.get("pick") or "OVER").upper()
+                    _sl_line = _sl.get("line", 0)
+                    _sl_txt  = (
+                        f"[SHADOW {tier.upper()}] {_sl.get('player','')} — "
+                        f"{_sl_pick} {_sl_line} {_sl_stat.upper()}  "
+                        f"edge:{_sl.get('edge',0):+.3f} parlay:{_pid}"
+                    )
+                    try:
+                        cur.execute("""
+                            INSERT INTO shadow_picks
+                                (game_id, game_date, home_team, away_team,
+                                 pick_type, player_name, stat, line,
+                                 direction, confidence, edge_score,
+                                 prob, implied_prob,
+                                 game_script, pick_text, blocked_by, role_tag,
+                                 parlay_id, created_at)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,%s,%s,NOW())
+                            ON CONFLICT (game_id, pick_type, player_name, stat) DO UPDATE
+                                SET parlay_id  = EXCLUDED.parlay_id,
+                                    edge_score = EXCLUDED.edge_score,
+                                    pick_text  = EXCLUDED.pick_text
+                        """, (
+                            game_id, game_date, home_team, away_team,
+                            tier,
+                            _sl.get("player", ""), _sl_stat, _sl_line,
+                            _sl_pick.lower(),
+                            round(_sl.get("prob", 0.5) * 100, 1),
+                            _sl.get("edge", 0),
+                            _sl.get("prob", 0.5), 0.5,
+                            gs_label, _sl_txt, _sl.get("position", ""),
+                            _pid,
+                        ))
+                        picks_stored += 1
+                    except Exception as _sge:
+                        print(f"[Shadow] SGP leg insert error {tier}: {_sge}")
+            print(f"[Shadow] Shadow SGP stored for {home_team} vs {away_team} "
+                  f"({len(_shadow_pass_legs)} pass legs used)")
+    except Exception as _sgp_err:
+        print(f"[Shadow] SGP block error: {_sgp_err}")
+
     # ── Mark shadows_generated ────────────────────────────────────────────────
     try:
         cur.execute("""
@@ -4986,6 +5105,129 @@ def _generate_shadow_picks(game_id, home_team, away_team, game_date):
         f"[Shadow] {picks_stored} candidates stored ({passed} PASS / {blocked} BLOCKED)"
         f" — {home_team} vs {away_team}"
     )
+
+
+def _generate_shadow_cgp(game_date):
+    """
+    Cross-game shadow parlay — mirrors _build_cross_game_parlay exactly.
+    Pulls all PASS prop shadow picks from today across all games, runs the
+    same greedy CGP algorithm, stores SAFE / BALANCED / AGGRESSIVE tiers.
+    Called once per day when the first game goes Final.
+    Never sends to any channel.
+    """
+    global _shadow_cgp_dates
+    _date_str = str(game_date)
+    if _date_str in _shadow_cgp_dates:
+        return
+    _shadow_cgp_dates.add(_date_str)
+
+    try:
+        conn = _db_conn()
+        if not conn:
+            return
+        cur = conn.cursor()
+
+        # Pull all PASS prop shadow picks for today (blocked_by IS NULL)
+        cur.execute("""
+            SELECT game_id, home_team, away_team, player_name, stat, line,
+                   direction, edge_score, prob, game_script, role_tag
+            FROM shadow_picks
+            WHERE game_date = %s
+              AND pick_type = 'prop'
+              AND blocked_by IS NULL
+              AND player_name != ''
+        """, (_date_str,))
+        rows = cur.fetchall()
+
+        if len(rows) < 4:
+            cur.close()
+            conn.close()
+            print(f"[ShadowCGP] Not enough PASS legs ({len(rows)}) for {_date_str}")
+            return
+
+        # Build pool in the format _build_cross_game_parlay expects
+        pool = []
+        for (gid, ht, at, pname, stat, line, direction, edge, prob,
+             gs_label, role_tag) in rows:
+            gname = f"{at} @ {ht}"
+            pool.append({
+                "player":   pname,
+                "bet_type": stat,
+                "line":     float(line or 0),
+                "odds":     -110,
+                "pick":     (direction or "over").upper(),
+                "edge":     float(edge or 0),
+                "prob":     float(prob or 0.5),
+                "position": role_tag or "",
+                "game":     gname,
+                "game_id":  gid,
+                "home_team": ht,
+                "game_date": _date_str,
+            })
+
+        # Reuse exact CGP greedy algorithm
+        tiers = _build_cross_game_parlay(pool)
+        import random as _cgp_r
+
+        stored_legs = 0
+        for tier_name, legs in [
+            ("cgp_safe",       tiers.get("safe",       [])),
+            ("cgp_balanced",   tiers.get("balanced",   [])),
+            ("cgp_aggressive", tiers.get("aggressive", [])),
+        ]:
+            if len(legs) < 2:
+                continue
+            _pid = f"{tier_name}_{_date_str}"
+            for leg in legs:
+                _stat  = (leg.get("bet_type") or "").lower()
+                _pick  = (leg.get("pick") or "OVER").upper()
+                _line  = leg.get("line", 0)
+                _gname = leg.get("game", "")
+                _ht    = leg.get("home_team") or (_gname.split(" @ ")[1].strip() if " @ " in _gname else "")
+                _at    = leg.get("away_team") or (_gname.split(" @ ")[0].strip() if " @ " in _gname else "")
+                _gid   = leg.get("game_id", _gname)
+                _txt   = (
+                    f"[SHADOW {tier_name.upper()}] {leg.get('player','')} — "
+                    f"{_pick} {_line} {_stat.upper()}  "
+                    f"edge:{leg.get('edge',0):+.3f}  parlay:{_pid}  game:{_gname}"
+                )
+                try:
+                    cur.execute("""
+                        INSERT INTO shadow_picks
+                            (game_id, game_date, home_team, away_team,
+                             pick_type, player_name, stat, line,
+                             direction, confidence, edge_score,
+                             prob, implied_prob,
+                             game_script, pick_text, blocked_by, role_tag,
+                             parlay_id, created_at)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,%s,%s,NOW())
+                        ON CONFLICT (game_id, pick_type, player_name, stat) DO UPDATE
+                            SET parlay_id  = EXCLUDED.parlay_id,
+                                edge_score = EXCLUDED.edge_score,
+                                pick_text  = EXCLUDED.pick_text
+                    """, (
+                        _gid, _date_str, _ht, _at,
+                        tier_name,
+                        leg.get("player", ""), _stat, _line,
+                        _pick.lower(),
+                        round(leg.get("prob", 0.5) * 100, 1),
+                        leg.get("edge", 0),
+                        leg.get("prob", 0.5), 0.5,
+                        leg.get("game_script", ""),
+                        _txt, leg.get("position", ""),
+                        _pid,
+                    ))
+                    stored_legs += 1
+                except Exception as _cge:
+                    print(f"[ShadowCGP] leg insert error {tier_name}: {_cge}")
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        print(f"[ShadowCGP] {stored_legs} legs stored across 3 tiers for {_date_str}")
+
+    except Exception as _cgp_err:
+        print(f"[ShadowCGP] error: {_cgp_err}")
 
 
 def _save_causality_events_to_db(game_id, game_date, causality_log):
@@ -5104,13 +5346,24 @@ def _grade_shadow_picks_for_game(game_id, game_date):
     g_row = cur.fetchone()
     actual_total = g_row[0] if g_row else None
 
+    _SGP_CGP_TYPES = {
+        "sgp_safe", "sgp_balanced", "sgp_aggressive",
+        "cgp_safe", "cgp_balanced", "cgp_aggressive",
+    }
+
     graded = 0
     for pick_id, pname, stat, line, direction, pick_type in picks:
         actual_val = None
         result     = None
         try:
-            if pick_type == "prop" and pname in stat_map:
-                actual_val = stat_map[pname].get(stat, 0)
+            _is_prop_like = (pick_type == "prop") or (pick_type in _SGP_CGP_TYPES)
+            if _is_prop_like and pname in stat_map:
+                _stat_key = {
+                    "points": "pts", "rebounds": "reb",
+                    "assists": "ast", "threes": "fg3m",
+                    "pts": "pts", "reb": "reb", "ast": "ast",
+                }.get(stat, stat)
+                actual_val = stat_map[pname].get(_stat_key, 0)
                 result = "win" if (
                     (direction == "over" and actual_val > line) or
                     (direction == "under" and actual_val < line)
@@ -5165,6 +5418,30 @@ def _grade_shadow_picks_for_game(game_id, game_date):
 
             except Exception as _le:
                 print(f"[Shadow] self-learning record error: {_le}")
+
+    # ── Log parlay results for any fully-graded SGP/CGP groups ─────────────────
+    try:
+        cur.execute("""
+            SELECT parlay_id,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN result = 'win'  THEN 1 ELSE 0 END) AS wins,
+                   SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
+                   SUM(CASE WHEN result IS NULL  THEN 1 ELSE 0 END) AS pending
+            FROM shadow_picks
+            WHERE parlay_id LIKE 'sgp_%%' || %s
+               OR parlay_id LIKE 'cgp_%%'
+            GROUP BY parlay_id
+            HAVING SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) = 0
+        """, (str(game_id),))
+        _parlay_rows = cur.fetchall()
+        for _pid, _tot, _w, _l, _pend in (_parlay_rows or []):
+            _parlay_hit = (_l == 0 and _w == _tot)
+            _tag        = "WIN" if _parlay_hit else "LOSS"
+            print(
+                f"[Shadow] Parlay {_pid}: {_w}W/{_l}L/{_pend}P → {_tag}"
+            )
+    except Exception as _pre:
+        print(f"[Shadow] parlay result log error: {_pre}")
 
     conn.commit()
     cur.close()
