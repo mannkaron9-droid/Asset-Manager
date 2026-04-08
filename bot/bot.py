@@ -9727,58 +9727,53 @@ def send_results_recap():
     total  = len(settled_recent)
     win_pct = round(len(wins) / total * 100) if total else 0
 
-    # ── Pick-by-pick lines (grouped: wins then losses) ──────────────
+    # ── Emoji map by bet type ────────────────────────────────────────
     PICK_EMOJI = {
-        "SPREAD": "📉", "MONEYLINE": "🔥", "OVER": "📈",
-        "UNDER": "📉", "points": "🏀", "rebounds": "💪",
-        "assists": "🔥", "threes": "🎯", "PARLAY": "🎯",
+        "SPREAD": "📉", "MONEYLINE": "🔥", "OVER": "📈", "UNDER": "📉",
+        "points": "🏀", "rebounds": "💪", "assists": "🎯", "threes": "🎯",
     }
 
-    def _fmt_pick(b):
-        bet_type = b.get("betType", "ML")
+    def _fmt_pick(b, hit):
+        """One-line pick summary — actual value shown in brackets."""
+        bet_type = b.get("betType", "")
         em       = PICK_EMOJI.get(bet_type, "🎯")
-        player   = b.get("player", "") or ""
+        player   = (b.get("player") or "").strip()
         pick     = b.get("pick", "")
-        game     = b.get("game", "") or ""
-        conf     = b.get("confidence", 0)
-        conf_str = f" — {conf}%" if conf else ""
-        # Player prop — show player name
+        game     = (b.get("game") or "").strip()
+        actual   = b.get("actual_value")
+        verb     = "hit" if hit else "got"
+        try:
+            av = float(actual)
+            av_fmt = int(av) if av == int(av) else round(av, 1)
+            actual_str = f" ({verb} {av_fmt})"
+        except (TypeError, ValueError):
+            actual_str = ""
         if player and player != game:
-            return f"{em} {player} {pick}{conf_str}"
-        # Game total (OVER/UNDER) — show game so you know which matchup
+            return f"{em} {player} {pick}{actual_str}"
         if bet_type in ("OVER", "UNDER") and game:
-            return f"{em} {pick} ({game}){conf_str}"
-        # Spread / Moneyline — pick already contains team name
-        return f"{em} {pick} ({bet_type}){conf_str}"
+            return f"{em} {pick} ({game}){actual_str}"
+        return f"{em} {pick}{actual_str}"
 
-    win_lines  = [_fmt_pick(b) for b in settled_recent if b["result"] == "win"]
-    loss_lines = [_fmt_pick(b) for b in settled_recent if b["result"] == "loss"]
-
-    picks_block = (
-        f"✅ *WINS ({len(win_lines)})*\n" + "\n".join(win_lines) +
-        f"\n\n❌ *LOSSES ({len(loss_lines)})*\n" + ("\n".join(loss_lines) if loss_lines else "_None_")
-    )
-    pick_lines = win_lines + loss_lines  # keep for compat
-
-    # ── Bet-type breakdown ──────────────────────────────────────────
-    type_record = {}
+    # ── ROI tracker (1 unit = $100) ──────────────────────────────────
+    roi = 0.0
     for b in settled_recent:
-        t = b.get("betType", "ML")
-        type_record.setdefault(t, {"w": 0, "l": 0})
+        odds = b.get("odds", 0) or 0
         if b["result"] == "win":
-            type_record[t]["w"] += 1
+            roi += (odds / 100.0) if odds > 0 else (100.0 / abs(odds)) if odds < 0 else 0.909
         else:
-            type_record[t]["l"] += 1
-    type_lines = []
-    for t, rec in sorted(type_record.items()):
-        em = "✅" if rec["w"] > rec["l"] else ("❌" if rec["l"] > rec["w"] else "➖")
-        type_lines.append(f"  {em} {t}: {rec['w']}-{rec['l']}")
+            roi -= 1.0
+    roi_sign = "+" if roi >= 0 else ""
 
-    # ── Current streak (across all-time settled bets) ───────────────
+    # ── All-time record ──────────────────────────────────────────────
     all_settled = sorted(
         [b for b in bets if b.get("result")],
         key=lambda b: b.get("time", "")
     )
+    all_wins  = sum(1 for b in all_settled if b["result"] == "win")
+    all_total = len(all_settled)
+    all_pct   = round(all_wins / all_total * 100) if all_total else 0
+
+    # ── Current streak ───────────────────────────────────────────────
     streak_count, streak_type = 0, None
     for b in reversed(all_settled):
         r = b["result"]
@@ -9788,55 +9783,22 @@ def send_results_recap():
             streak_count += 1
         else:
             break
-    if streak_type == "win":
-        streak_line = f"🔥 *{streak_count} WIN STREAK*" if streak_count > 1 else "🔥 Won last pick"
-    else:
-        streak_line = f"❄️ *{streak_count} game skid*" if streak_count > 1 else "❌ Lost last pick"
 
-    # ── Best pick of the night ──────────────────────────────────────
-    best = max(wins, key=lambda b: b.get("confidence", 0), default=None)
-    best_line = ""
-    if best:
-        best_line = (
-            f"⭐ *Best Pick:* {best['pick']} ({best.get('betType','ML')}) "
-            f"— {best.get('confidence', 0)}% conf"
-        )
+    # ── Best win of the night (for free channel teaser) ──────────────
+    top_play = max(wins, key=lambda b: b.get("confidence", 0), default=None)
 
-    # ── ROI tracker (1 unit = $100, default -110 juice) ─────────────
-    roi = 0.0
-    for b in settled_recent:
-        odds = b.get("odds", 0) or 0
-        if b["result"] == "win":
-            if odds > 0:
-                roi += (odds / 100.0)
-            elif odds < 0:
-                roi += (100.0 / abs(odds))
-            else:
-                roi += 0.909      # -110 default
-        else:
-            roi -= 1.0
-    roi_sign = "+" if roi >= 0 else ""
-    roi_line = f"💰 *ROI tonight:* {roi_sign}{roi:.2f}u  _(1u = $100)_"
+    def _pick_label(b):
+        player   = (b.get("player") or "").strip()
+        pick     = b.get("pick", "")
+        bet_type = b.get("betType", "")
+        game     = (b.get("game") or "").strip()
+        if player and player != game:
+            return f"{player} — {pick}"
+        if bet_type in ("OVER", "UNDER") and game:
+            return f"{pick} ({game})"
+        return pick
 
-    # ── Confidence accuracy ─────────────────────────────────────────
-    high_conf = [b for b in settled_recent if b.get("confidence", 0) >= 75]
-    low_conf  = [b for b in settled_recent if b.get("confidence", 0) <  75]
-    hc_hits   = sum(1 for b in high_conf if b["result"] == "win")
-    lc_hits   = sum(1 for b in low_conf  if b["result"] == "win")
-    conf_parts = []
-    if high_conf:
-        conf_parts.append(f"75%+ conf: *{round(hc_hits/len(high_conf)*100)}%* hit")
-    if low_conf:
-        conf_parts.append(f"<75% conf: *{round(lc_hits/len(low_conf)*100)}%* hit")
-    conf_line = "🎯 " + "  ·  ".join(conf_parts) if conf_parts else ""
-
-    # ── All-time record ─────────────────────────────────────────────
-    all_wins  = sum(1 for b in all_settled if b["result"] == "win")
-    all_total = len(all_settled)
-    all_pct   = round(all_wins / all_total * 100) if all_total else 0
-    all_time_line = f"📈 All-time: {all_wins}-{all_total - all_wins} ({all_pct}%)"
-
-    # ── Tonight's preview teaser ────────────────────────────────────
+    # ── Tonight's preview teaser ─────────────────────────────────────
     preview_line = ""
     try:
         tonight = get_todays_games()
@@ -9849,215 +9811,48 @@ def send_results_recap():
     except Exception:
         pass
 
-    # ── Assemble full message (Performance Report format) ───────────
-    D   = "━━━━━━━━━━━━━━━━━━━"
-    SEP = "\n---\n"
-    roi_sign = "+" if roi >= 0 else ""
-
-    # ── Highlights ──────────────────────────────────────────────────
-    top_play   = max(wins,   key=lambda b: b.get("confidence", 0), default=None)
-    worst_beat = max(losses, key=lambda b: b.get("confidence", 0), default=None)
-    # Best value = win with lowest confidence (beat the odds)
-    value_hit  = min(wins,   key=lambda b: b.get("confidence", 0), default=None)
-
-    def _pick_label(b):
-        """Short readable label for a single bet — FanDuel format only, no model data."""
-        player   = b.get("player", "") or ""
-        pick     = b.get("pick", "")
-        bet_type = b.get("betType", "")
-        game     = b.get("game", "") or ""
-        if player and player != game:
-            return f"{player} — {pick}"
-        if bet_type in ("OVER", "UNDER") and game:
-            return f"{pick} ({game})"
-        return pick
-
-    highlights = ""
-    if top_play:
-        tp_rec = f"1–0"
-        highlights += (
-            f"🔥 *TOP PLAY OF THE DAY*\n"
-            f"Record: {tp_rec}\n"
-            f"{_pick_label(top_play)}\n"
-        )
-    if value_hit and value_hit != top_play:
-        highlights += f"\n💎 *BEST VALUE HIT*\n{_pick_label(value_hit)}\n"
-    if worst_beat:
-        highlights += f"\n📉 *WORST BEAT OF THE DAY*\n{_pick_label(worst_beat)}"
-
-    # ── Category grouping helpers ────────────────────────────────────
-    PROP_TYPES_RC = {"points", "rebounds", "assists", "threes", "steals", "blocks"}
-
-    _PROP_BET_CATS = {
-        "elite_prop", "individual", "prop", "neutral_prop",
-        "fade_prop", "benefactor_prop",
-    }
-
-    def _cat(b):
-        bt = b.get("betType", "")
-        if bt in PROP_TYPES_RC:               return "props"
-        if bt.lower() in _PROP_BET_CATS:      return "props"
-        if bt == "SPREAD":                     return "spreads"
-        if bt in ("OVER", "UNDER"):            return "totals"
-        if b.get("betType") == "MONEYLINE":   return "moneylines"
-        return "moneylines"
-
-    def _cat_lines(bet_list):
-        groups = {"props": [], "spreads": [], "totals": [], "moneylines": []}
-        for b in bet_list:
-            groups[_cat(b)].append(b)
-        out = []
-        if groups["props"]:
-            out.append("🏀 *Player Props*")
-            for b in groups["props"]:
-                out.append(f"  {_pick_label(b)}")
-        if groups["spreads"]:
-            out.append("📉 *Spreads*")
-            for b in groups["spreads"]:
-                out.append(f"  {_pick_label(b)}")
-        if groups["totals"]:
-            out.append("📊 *Totals*")
-            for b in groups["totals"]:
-                out.append(f"  {_pick_label(b)}")
-        if groups["moneylines"]:
-            out.append("🔥 *Moneylines*")
-            for b in groups["moneylines"]:
-                out.append(f"  {_pick_label(b)}")
-        return "\n".join(out)
-
-    wins_section   = f"✅ *SUCCESSFUL PLAYS ({len(wins)})*\n\n{_cat_lines(wins)}"
-    losses_section = f"❌ *UNSUCCESSFUL PLAYS ({len(losses)})*\n\n" + (_cat_lines(losses) if losses else "_None_")
-
-    # ── Performance breakdown table ──────────────────────────────────
-    # Group by category (Props / Spreads / Totals / Moneylines)
-    cat_record = {"props": {"w":0,"l":0}, "spreads": {"w":0,"l":0},
-                  "totals": {"w":0,"l":0}, "moneylines": {"w":0,"l":0}}
-    for b in settled_recent:
-        c = _cat(b)
-        cat_record[c]["w" if b["result"]=="win" else "l"] += 1
-
-    CAT_DISPLAY = {"props": "Player Props", "spreads": "Spreads",
-                   "totals": "Totals", "moneylines": "Moneylines"}
-    perf_rows = []
-    for c, label in CAT_DISPLAY.items():
-        w, l = cat_record[c]["w"], cat_record[c]["l"]
-        if w + l == 0:
-            continue
-        pct = round(w / (w + l) * 100)
-        perf_rows.append(f"  {label:<14} {w}–{l}    {pct}%")
-    perf_table = (
-        "*📈 PERFORMANCE BREAKDOWN*\n"
-        "`  Category       Record  Win Rate`\n"
-        "`" + "`\n`".join(perf_rows) + "`"
-    ) if perf_rows else ""
-
-    # ── Strategy breakdown (SAFE / BALANCED / AGGRESSIVE) ───────────
-    tier_record = {}
-    for b in settled_recent:
-        tier = (b.get("tier") or "").upper()
-        if tier not in ("SAFE", "BALANCED", "AGGRESSIVE"):
-            continue
-        tier_record.setdefault(tier, {"w": 0, "l": 0})
-        tier_record[tier]["w" if b["result"] == "win" else "l"] += 1
-
-    strat_table = ""
-    if tier_record:
-        strat_rows = []
-        for tier in ("SAFE", "BALANCED", "AGGRESSIVE"):
-            if tier not in tier_record:
-                continue
-            w, l = tier_record[tier]["w"], tier_record[tier]["l"]
-            pct = round(w / (w + l) * 100)
-            strat_rows.append(f"  {tier:<12} {w}–{l}    {pct}%")
-        strat_table = (
-            "*🎯 STRATEGY BREAKDOWN*\n"
-            "`  Tier          Record  Win Rate`\n"
-            "`" + "`\n`".join(strat_rows) + "`"
-        )
-
-    # ── Pick category breakdown ──────────────────────────────────────
-    _cat_record = {}
-    for b in settled_recent:
-        _bc = b.get("pick_category") or (
-            "VIP_LOCK" if b.get("betType") == "VIP_LOCK" else
-            "SGP"      if b.get("betType") == "SGP"      else
-            "INDIVIDUAL"
-        )
-        _cat_record.setdefault(_bc, {"w": 0, "l": 0})
-        _cat_record[_bc]["w" if b["result"] == "win" else "l"] += 1
-
-    _cat_label_map = {
-        "VIP_LOCK":         "VIP Lock",
-        "CROSS_GAME_PARLAY": "Cross Game Parlay",
-        "SGP":              "SGP",
-        "INDIVIDUAL":       "Individual",
-    }
-    cat_table = ""
-    if _cat_record:
-        _cat_rows = []
-        for _ck in ("VIP_LOCK", "INDIVIDUAL", "CROSS_GAME_PARLAY", "SGP"):
-            if _ck not in _cat_record:
-                continue
-            _cw, _cl = _cat_record[_ck]["w"], _cat_record[_ck]["l"]
-            _cpct = round(_cw / (_cw + _cl) * 100) if (_cw + _cl) else 0
-            _clabel = _cat_label_map.get(_ck, _ck)
-            _cat_rows.append(f"  {_clabel:<16} {_cw}–{_cl}    {_cpct}%")
-        if _cat_rows:
-            cat_table = (
-                "*🗂 PICK CATEGORY BREAKDOWN*\n"
-                "`  Category         Record  Win Rate`\n"
-                "`" + "`\n`".join(_cat_rows) + "`"
-            )
-
-    # ── Final takeaway (auto-generated) ─────────────────────────────
-    prop_w = cat_record["props"]["w"]
-    prop_l = cat_record["props"]["l"]
-    tot_w  = cat_record["totals"]["w"]
-    tot_l  = cat_record["totals"]["l"]
-    spr_w  = cat_record["spreads"]["w"]
+    # ── Auto-generated takeaway ──────────────────────────────────────
+    prop_wins  = sum(1 for b in wins   if b.get("betType","") in ("points","rebounds","assists","threes"))
+    prop_loss  = sum(1 for b in losses if b.get("betType","") in ("points","rebounds","assists","threes"))
+    total_wins = sum(1 for b in wins   if b.get("betType","") in ("OVER","UNDER"))
+    total_loss = sum(1 for b in losses if b.get("betType","") in ("OVER","UNDER"))
+    spread_win = sum(1 for b in wins   if b.get("betType","") == "SPREAD")
 
     if win_pct >= 70:
-        if prop_w > 0 and prop_l == 0:
+        if prop_wins > 0 and prop_loss == 0:
             takeaway = "Dominant night — player props went perfect. Model is dialled in."
-        elif spr_w > 0:
+        elif spread_win > 0:
             takeaway = "Strong performance across the board. Spreads and props both delivered."
         else:
-            takeaway = f"Profitable night at {win_pct}%. Model continues to identify high-value spots."
+            takeaway = f"Profitable night at {win_pct}%. Model continues to find high-value spots."
     elif win_pct >= 50:
-        if tot_l > 0:
+        if total_loss > 0:
             takeaway = "Solid night on props and spreads. Game totals were the weak spot — model is adjusting."
         else:
             takeaway = "Steady night. Above breakeven and the model is building confidence."
     else:
         takeaway = "Tough night. Model is reviewing the losses and self-correcting for tomorrow."
 
-    # ── Build full message ───────────────────────────────────────────
-    parts = [
-        f"🏆 *ELITE PICKS — PERFORMANCE REPORT*\n_{et_now.strftime('%B %d, %Y')}_",
-        D,
-        highlights,
-        D,
-        wins_section,
-        D,
-        losses_section,
-        D,
-        perf_table,
-    ]
-    if strat_table:
-        parts += [SEP.strip(), strat_table]
-    if cat_table:
-        parts += [SEP.strip(), cat_table]
+    # ── Assemble message ─────────────────────────────────────────────
+    D = "━━━━━━━━━━━━━━━━━━━"
+    win_lines  = [_fmt_pick(b, True)  for b in settled_recent if b["result"] == "win"]
+    loss_lines = [_fmt_pick(b, False) for b in settled_recent if b["result"] == "loss"]
 
-    parts += [
+    wins_block  = "✅ *WINS*\n"  + "\n".join(win_lines)  if win_lines  else ""
+    loss_block  = "❌ *LOSSES*\n" + "\n".join(loss_lines) if loss_lines else ""
+
+    parts = [
+        f"📊 *RESULTS — {et_now.strftime('%b %d')}*",
         D,
-        f"📊 *Record: {len(wins)}-{len(losses)} ({win_pct}% hit rate)*\n"
-        f"📈 All-time: *{all_wins}-{all_total - all_wins}* ({all_pct}%)\n"
-        f"🔒 Model is learning from every result.",
+        f"✅ {len(wins)}   ❌ {len(losses)}   {win_pct}% hit rate\n"
+        f"💰 {roi_sign}{roi:.2f}u  ·  Season: {all_wins}-{all_total - all_wins} ({all_pct}%)",
         D,
-        f"🔒 *FINAL TAKEAWAY*\n{takeaway}",
     ]
-    if preview_line:
-        parts += [D, preview_line.strip()]
+    if wins_block:
+        parts.append(wins_block)
+    if loss_block:
+        parts.append(loss_block)
+    parts += [D, f"_{takeaway}_"]
 
     msg = "\n".join(parts)
     send(msg, VIP_CHANNEL)
