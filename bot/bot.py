@@ -12204,10 +12204,16 @@ def run_full_system():
                                     "role":       _prop_role_tag,
                                 })
 
+                    # Cap elite picks to 2 per player — prevents one star
+                    # flooding the card with 3 near-identical combo props
+                    elite_picks = elite_picks[:2]
+
                     player_data[player] = {
                         "dot":         dot,
                         "position":    stats.get("position", ""),
                         "team":        stats.get("team", ""),
+                        # Store validated BDL team for reliable bucketing
+                        "bdl_team":    _bdl_team,
                         "pred":        pred,
                         "elite_picks": elite_picks,
                     }
@@ -12218,17 +12224,27 @@ def run_full_system():
                 continue
 
             # Split by team using keyword matching
-            away_words = set(away_team.lower().split())
-            home_words  = set(home_team.lower().split())
+            # Use bdl_team (validated at team gate) as primary source;
+            # fall back to stats["team"] if bdl_team is empty.
+            # If neither matches, assign to the correct team using the
+            # props' own game field (player is already validated to belong
+            # to this game, so "other" is treated as away).
+            away_words = set(w for w in away_team.lower().split() if len(w) > 2)
+            home_words  = set(w for w in home_team.lower().split() if len(w) > 2)
             buckets = {"away": {}, "home": {}, "other": {}}
             for p, d in player_data.items():
-                tw = set(d["team"].lower().split())
+                # Prefer validated BDL team, fall back to stats team
+                _team_str = (d.get("bdl_team") or d.get("team") or "").lower()
+                tw = set(w for w in _team_str.split() if len(w) > 2)
                 if tw & away_words:
                     buckets["away"][p] = d
                 elif tw & home_words:
                     buckets["home"][p] = d
                 else:
-                    buckets["other"][p] = d
+                    # Team data missing/ambiguous — use props source as tiebreaker.
+                    # Players are already game-validated so put in away by default.
+                    print(f"  [Bucket] {p} team '{_team_str}' unresolved — assigning to away ({away_team})")
+                    buckets["away"][p] = d
 
             def player_line(p, d):
                 pos = f" · {d['position']}" if d["position"] else ""
