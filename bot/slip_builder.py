@@ -478,11 +478,13 @@ def build_slip_from_props(
                         leg.confidence = round(leg.confidence + form_adj, 1)
                         adj_log.append(f"form {form_adj:+.1f}")
 
-                    # 2. Historical accuracy adjustment per player
-                    #    Uses stat-specific hit rate (e.g. points vs rebounds).
+                    # 2. Historical accuracy adjustment per player.
+                    #    Uses stat-specific hit rate and, when available, the
+                    #    player's role-segmented win rate from the bets table
+                    #    (60% role signal / 40% overall when both have ≥5 picks).
                     try:
                         from bot.bot import get_player_confidence_adjustment as _gca
-                        hist_adj = _gca(player, prop_type)
+                        hist_adj = _gca(player, prop_type, role=getattr(leg, "role", None))
                     except Exception:
                         hist_adj = float(stats.get("confidence_adj", 0.0))
                     if hist_adj != 0.0:
@@ -784,39 +786,41 @@ def get_top_candidates(
 def slip_to_bet_records(slip: Slip, timestamp: str) -> list:
     """
     Convert a Slip into a list of bet dicts for save_bet() in bot.py.
-    Adds new fields: slip_grade, role, is_fade, is_benefactor, fade_target, ev.
+    Adds new fields: slip_grade, role, avg_usage, is_fade, is_benefactor,
+    fade_target, ev.
     """
     records = []
     for leg in slip.legs:
         records.append({
-            "game":            leg.game,
-            "player":          leg.player,
-            "pick":            f"{leg.direction} {leg.line}",
-            "betType":         leg.stat,
-            "line":            leg.line,
-            "prediction":      leg.prediction,
-            "odds":            leg.odds,
-            "prob":            leg.true_prob,
-            "edge":            round(leg.ev, 4),
-            "confidence":      leg.confidence,
-            "time":            timestamp,
-            "result":          None,
-            "script":          leg.game_script_label,
-            "slip_grade":      slip.grade,
-            "role":            leg.role,
-            "is_fade":         leg.is_fade,
-            "is_benefactor":   leg.is_benefactor,
-            "fade_target":     leg.fade_target,
-            "ev":              leg.ev,
-            "pick_category":   "EDGE_FADE_7",
+            "game":              leg.game,
+            "player":            leg.player,
+            "pick":              f"{leg.direction} {leg.line}",
+            "betType":           leg.stat,
+            "line":              leg.line,
+            "prediction":        leg.prediction,
+            "odds":              leg.odds,
+            "prob":              leg.true_prob,
+            "edge":              round(leg.ev, 4),
+            "confidence":        leg.confidence,
+            "time":              timestamp,
+            "result":            None,
+            "script":            leg.game_script_label,
+            "slip_grade":        slip.grade,
+            "role":              leg.role,
+            "player_avg_usage":  getattr(leg, "avg_usage", None),
+            "is_fade":           leg.is_fade,
+            "is_benefactor":     leg.is_benefactor,
+            "fade_target":       leg.fade_target,
+            "ev":                leg.ev,
+            "pick_category":     "EDGE_FADE_7",
             # ── new fields from engine upgrades ──────────────────────────
-            "line_rating":     getattr(leg, "line_rating",   "GOOD"),
-            "line_decision":   getattr(leg, "line_decision", "RISK"),
-            "true_edge":       getattr(leg, "edge",          None),
-            "parlay_hit_prob": getattr(slip, "parlay_hit_prob", None),
-            "parlay_ev":       getattr(slip, "parlay_ev",       None),
+            "line_rating":       getattr(leg, "line_rating",   "GOOD"),
+            "line_decision":     getattr(leg, "line_decision", "RISK"),
+            "true_edge":         getattr(leg, "edge",          None),
+            "parlay_hit_prob":   getattr(slip, "parlay_hit_prob", None),
+            "parlay_ev":         getattr(slip, "parlay_ev",       None),
             # ── context fields for pattern engine ────────────────────────
-            "game_pace":       getattr(leg, "game_pace",  "AVERAGE_PACE"),
-            "game_phase":      getattr(leg, "game_phase", "pregame"),
+            "game_pace":         getattr(leg, "game_pace",  "AVERAGE_PACE"),
+            "game_phase":        getattr(leg, "game_phase", "pregame"),
         })
     return records
