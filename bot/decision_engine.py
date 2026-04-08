@@ -3392,3 +3392,118 @@ def get_shot_efficiency_signal(conn, player_name: str, stat_type: str,
         return 1.0
 
     return 1.0
+
+
+def get_rest_signal(conn, player_name: str) -> float:
+    """
+    Returns a confidence multiplier based on the player's rest days before
+    today's game. B2B (1 rest day) = slight fade; 3+ days rest = slight boost.
+    """
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT rest_days FROM player_observations
+            WHERE player_name = %s AND rest_days > 0
+            ORDER BY observed_at DESC LIMIT 1
+        """, (player_name,))
+        row = cur.fetchone()
+        cur.close()
+        if not row:
+            return 1.0
+        days = int(row[0])
+        if days == 1:   return 0.94   # Back-to-back
+        if days >= 3:   return 1.05   # Well-rested
+        return 1.0
+    except Exception:
+        return 1.0
+
+
+def get_opp_defense_signal(conn, player_name: str, stat_type: str) -> float:
+    """
+    Returns a confidence multiplier based on opponent defensive rating
+    (avg pts allowed per observed player). Only applies to points props.
+    """
+    if stat_type != "points":
+        return 1.0
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT opp_def_rating FROM player_observations
+            WHERE player_name = %s AND opp_def_rating > 0
+            ORDER BY observed_at DESC LIMIT 1
+        """, (player_name,))
+        row = cur.fetchone()
+        cur.close()
+        if not row or not row[0]:
+            return 1.0
+        odr = float(row[0])
+        if odr >= 17:   return 1.08   # Soft defense
+        if odr >= 15:   return 1.03
+        if odr <= 11:   return 0.92   # Elite defense
+        if odr <= 13:   return 0.97
+        return 1.0
+    except Exception:
+        return 1.0
+
+
+def get_turnover_signal(conn, player_name: str, stat_type: str,
+                        lookback_games: int = 5) -> float:
+    """
+    Fade assists + points when player has a high recent turnover rate.
+    """
+    if stat_type not in ("assists", "points"):
+        return 1.0
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT turnovers, touches FROM player_observations
+            WHERE player_name = %s AND touches > 0
+            ORDER BY observed_at DESC LIMIT %s
+        """, (player_name, lookback_games))
+        rows = cur.fetchall()
+        cur.close()
+        if not rows:
+            return 1.0
+        total_to  = sum(r[0] for r in rows)
+        total_tch = sum(r[1] for r in rows)
+        if total_tch < 20:
+            return 1.0
+        to_rate = total_to / total_tch
+        if to_rate >= 0.12:   return 0.93
+        if to_rate >= 0.08:   return 0.97
+        if to_rate <= 0.03:   return 1.04
+        return 1.0
+    except Exception:
+        return 1.0
+
+
+def get_ft_rate_signal(conn, player_name: str, stat_type: str,
+                       lookback_games: int = 5) -> float:
+    """
+    Boost points props when player has a high free-throw attempt rate
+    (gets to the line a lot = higher scoring floor).
+    """
+    if stat_type != "points":
+        return 1.0
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT fta, rim_a FROM player_observations
+            WHERE player_name = %s AND (fta + rim_a) > 0
+            ORDER BY observed_at DESC LIMIT %s
+        """, (player_name, lookback_games))
+        rows = cur.fetchall()
+        cur.close()
+        if not rows:
+            return 1.0
+        total_fta = sum(r[0] for r in rows)
+        total_rim = sum(r[1] for r in rows)
+        if total_rim < 5:
+            return 1.0
+        ft_rate = total_fta / total_rim
+        if ft_rate >= 0.8:   return 1.06
+        if ft_rate >= 0.6:   return 1.02
+        if ft_rate <= 0.2:   return 0.97
+        return 1.0
+    except Exception:
+        return 1.0
