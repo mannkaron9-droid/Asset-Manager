@@ -104,7 +104,8 @@ def _db_init():
             )
         """)
         cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS tier VARCHAR(20) DEFAULT 'BALANCED'")
-        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS script VARCHAR(20) DEFAULT 'NORMAL'")
+        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS script TEXT DEFAULT 'NORMAL'")
+        cur.execute("ALTER TABLE bets ALTER COLUMN script TYPE TEXT")
         cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS game_total REAL")
         cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS game_spread REAL")
         cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS player_avg_mins REAL")
@@ -124,8 +125,11 @@ def _db_init():
         cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS true_edge REAL DEFAULT NULL")
         cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS parlay_hit_prob REAL DEFAULT NULL")
         cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS parlay_ev REAL DEFAULT NULL")
-        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS game_pace VARCHAR(10) DEFAULT 'MED'")
-        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS game_phase VARCHAR(10) DEFAULT 'pregame'")
+        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS game_pace TEXT DEFAULT 'AVERAGE_PACE'")
+        cur.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS game_phase TEXT DEFAULT 'pregame'")
+        # Widen any pre-existing VARCHAR(10) columns that were too narrow for pace labels
+        cur.execute("ALTER TABLE bets ALTER COLUMN game_pace TYPE TEXT")
+        cur.execute("ALTER TABLE bets ALTER COLUMN game_phase TYPE TEXT")
         cur.execute("""
             UPDATE bets SET pick_category = CASE
                 WHEN bet_type = 'VIP_LOCK' THEN 'VIP_LOCK'
