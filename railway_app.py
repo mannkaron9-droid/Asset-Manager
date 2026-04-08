@@ -108,26 +108,63 @@ def _try_parse(v):
 
 
 def load_bets():
+    """Load bets from Postgres AND bets.json, merge & deduplicate. Never loses picks."""
+    db_bets  = []
+    json_bets = []
+
+    # ── 1. Try Postgres ──────────────────────────────────────────────────────
     conn = _db_conn()
     if conn:
         try:
             cur = conn.cursor()
-            cur.execute("SELECT game, player, pick, bet_type, line, prediction, odds, prob, edge, confidence, result, bet_time, tier, script FROM bets ORDER BY created_at ASC")
+            cur.execute("""
+                SELECT game, player, pick, bet_type, line, prediction,
+                       odds, prob, edge, confidence, result, bet_time, tier, script
+                FROM bets ORDER BY COALESCE(bet_time, created_at) ASC
+            """)
             rows = cur.fetchall()
             cur.close(); conn.close()
-            keys = ["game","player","pick","betType","line","prediction","odds","prob","edge","confidence","result","time","tier","script"]
-            return [dict(zip(keys, r)) for r in rows]
+            keys = ["game","player","pick","betType","line","prediction",
+                    "odds","prob","edge","confidence","result","time","tier","script"]
+            db_bets = [dict(zip(keys, r)) for r in rows]
+            print(f"[load_bets] DB: {len(db_bets)} bets")
         except Exception as e:
             print(f"[DB] load_bets error: {e}")
             try: conn.close()
             except Exception: pass
+
+    # ── 2. Always also try bets.json (may have picks the DB missed) ──────────
     try:
         if os.path.exists(BETS_FILE):
             with open(BETS_FILE) as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return []
+                json_bets = json.load(f) or []
+            print(f"[load_bets] JSON: {len(json_bets)} bets")
+    except Exception as e:
+        print(f"[load_bets] JSON error: {e}")
+
+    # ── 3. Merge: Postgres wins on duplicates (it has authoritative result) ──
+    if not json_bets:
+        return db_bets
+    if not db_bets:
+        return json_bets
+
+    seen = set()
+    merged = []
+    for b in db_bets:
+        key = (b.get("game",""), b.get("pick",""), str(b.get("betType","MONEYLINE")), str(b.get("time",""))[:10])
+        seen.add(key)
+        merged.append(b)
+
+    for b in json_bets:
+        _t = b.get("time", b.get("bet_time", ""))
+        key = (b.get("game",""), b.get("pick",""), str(b.get("betType","MONEYLINE")), str(_t)[:10])
+        if key not in seen:
+            seen.add(key)
+            merged.append(b)
+
+    merged.sort(key=lambda b: str(b.get("time", b.get("bet_time",""))), reverse=False)
+    print(f"[load_bets] Merged total: {len(merged)} bets")
+    return merged
 
 
 def load_status():
@@ -331,10 +368,10 @@ def get_streak():
 @app.route("/api/bets/by-type", methods=["GET"])
 def get_bets_by_type():
     bets = load_bets()
-    types = ["MONEYLINE", "SPREAD", "OVER", "UNDER"]
+    types = ["MONEYLINE", "SPREAD", "OVER", "UNDER", "POINTS", "REBOUNDS", "ASSISTS", "THREES", "SGP", "VIP_LOCK"]
     result = {}
     for t in types:
-        group = [b for b in bets if (b.get("betType") or "MONEYLINE") == t]
+        group = [b for b in bets if (b.get("betType") or "MONEYLINE").upper() == t]
         w = sum(1 for b in group if (b.get("result") or "").upper() == "WIN")
         l = sum(1 for b in group if (b.get("result") or "").upper() == "LOSS")
         p = sum(1 for b in group if not b.get("result"))
@@ -344,6 +381,40 @@ def get_bets_by_type():
             "winRate": round((w / settled) * 100, 1) if settled else 0
         }
     return jsonify(result)
+
+
+# ── Debug: DB health + bet counts (Railway diagnostics) ────────────────────────
+@app.route("/api/debug/bets", methods=["GET"])
+def debug_bets():
+    info = {"json_count": 0, "db_count": 0, "db_ok": False, "db_error": None,
+            "latest_db_bet": None, "latest_json_bet": None}
+    try:
+        if os.path.exists(BETS_FILE):
+            jb = json.load(open(BETS_FILE))
+            info["json_count"] = len(jb)
+            if jb:
+                times = sorted([b.get("time","") for b in jb if b.get("time")], reverse=True)
+                info["latest_json_bet"] = times[0] if times else None
+    except Exception as e:
+        info["json_error"] = str(e)
+    conn = _db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*), MAX(COALESCE(bet_time, created_at)) FROM bets")
+            cnt, latest = cur.fetchone()
+            info["db_count"]      = cnt or 0
+            info["db_ok"]         = True
+            info["latest_db_bet"] = str(latest) if latest else None
+            cur.execute("SELECT key, value FROM bot_status WHERE key IN ('lastRun','picksToday')")
+            for k, v in cur.fetchall():
+                info[f"status_{k}"] = v
+            cur.close(); conn.close()
+        except Exception as e:
+            info["db_error"] = str(e)
+            try: conn.close()
+            except Exception: pass
+    return jsonify(info)
 
 
 # ── Schedule ───────────────────────────────────────────────────────────────────
