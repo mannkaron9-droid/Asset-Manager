@@ -7860,17 +7860,24 @@ def _check_odds_quota(resp):
         if remaining < 0:
             return
         print(f"[Odds API] Quota — {remaining} remaining ({used} used)")
+        _save_quota_state(remaining)   # persist so restarts know the count
         today = datetime.now().strftime("%Y-%m-%d")
-        for threshold in [200, 100, 50, 10]:
+        for threshold in [200, 100, 50, 10, 5]:
             key = f"{threshold}:{today}"
             if remaining <= threshold and key not in _odds_quota_alerted:
                 _odds_quota_alerted.add(key)
-                send(
+                msg = (
                     f"⚠️ *Odds API Quota Warning*\n\n"
                     f"Only *{remaining}* requests remaining this month.\n"
-                    f"Renew at the-odds-api.com before picks stop.",
-                    ADMIN_ID
+                    f"Renew at the-odds-api.com before picks stop."
                 )
+                if remaining <= _QUOTA_HARD_BLOCK:
+                    msg += (
+                        f"\n\n🛑 *Hard block active* — bot will NOT call Odds API "
+                        f"until quota renews or key is upgraded. "
+                        f"Using last cached props data only."
+                    )
+                send(msg, ADMIN_ID)
                 break
     except Exception:
         pass
@@ -8031,7 +8038,66 @@ _props_cache_ts     = 0.0  # epoch time of last real API fetch (throttles retrie
 _player_stats_cache: dict = {}   # player_name -> (stats_dict, fetched_at_epoch) — 90 min TTL
 _PLAYER_STATS_TTL   = 5400       # 90 minutes
 
-_PROPS_CACHE_TTL = 1800  # seconds — re-fetch at most once per 30 minutes
+_PROPS_CACHE_TTL   = 1800  # seconds — re-fetch at most once per 30 minutes
+_PROPS_CACHE_FILE  = os.path.join(os.path.dirname(__file__), "..", "props_cache.json")
+_QUOTA_STATE_FILE  = os.path.join(os.path.dirname(__file__), "..", "odds_quota.json")
+_QUOTA_HARD_BLOCK  = 5     # if remaining ≤ this, never call the API — protect last calls
+
+_odds_quota_remaining: int = 999   # last known remaining count — persisted across restarts
+
+
+def _load_quota_state():
+    """Load persisted quota count from disk so restarts don't lose the count."""
+    global _odds_quota_remaining
+    try:
+        if os.path.exists(_QUOTA_STATE_FILE):
+            data = json.load(open(_QUOTA_STATE_FILE))
+            _odds_quota_remaining = int(data.get("remaining", 999))
+            print(f"[Quota] Loaded from disk: {_odds_quota_remaining} remaining")
+    except Exception as e:
+        print(f"[Quota] load error: {e}")
+
+
+def _save_quota_state(remaining: int):
+    """Persist quota count to disk so restarts still know how many calls are left."""
+    global _odds_quota_remaining
+    _odds_quota_remaining = remaining
+    try:
+        json.dump({"remaining": remaining, "updated": str(datetime.now())},
+                  open(_QUOTA_STATE_FILE, "w"))
+    except Exception:
+        pass
+
+
+def _load_props_cache_from_disk():
+    """Load the last saved props cache from disk on startup."""
+    global _props_cache, _props_cache_ts
+    try:
+        if os.path.exists(_PROPS_CACHE_FILE):
+            data = json.load(open(_PROPS_CACHE_FILE))
+            saved_ts  = float(data.get("ts", 0))
+            saved_data = data.get("props", [])
+            age = time.time() - saved_ts
+            # Only restore if cache is < 6 hours old (props valid for same day)
+            if saved_data and age < 21600:
+                _props_cache    = saved_data
+                _props_cache_ts = saved_ts
+                print(f"[Props] Restored {len(saved_data)} games from disk cache "
+                      f"(age {int(age//60)}m)")
+            else:
+                print(f"[Props] Disk cache too old ({int(age//3600)}h) — will re-fetch")
+    except Exception as e:
+        print(f"[Props] disk cache load error: {e}")
+
+
+def _save_props_cache_to_disk(props: list):
+    """Persist props to disk so bot restarts don't burn API calls."""
+    try:
+        json.dump({"ts": time.time(), "props": props},
+                  open(_PROPS_CACHE_FILE, "w"))
+        print(f"[Props] Saved {len(props)} games to disk cache")
+    except Exception as e:
+        print(f"[Props] disk cache save error: {e}")
 
 def get_player_props(force=False):
     """
@@ -8049,9 +8115,19 @@ def get_player_props(force=False):
     Cache policy:
       - Returns cached data if last fetch was < 30 min ago, unless force=True.
       - force=True bypasses cache (used only on confirmed game-time triggers).
+      - Disk cache is loaded on startup so bot restarts don't burn API calls.
+      - HARD BLOCK: if quota ≤ _QUOTA_HARD_BLOCK, never call the API.
     """
     import time as _time_mod
     global _props_cache, _props_cache_hour, _props_cache_ts
+
+    # ── Hard block: protect last remaining calls ──────────────────────────────
+    if _odds_quota_remaining <= _QUOTA_HARD_BLOCK and not force:
+        print(f"[Props] 🛑 QUOTA HARD BLOCK — {_odds_quota_remaining} remaining, "
+              f"using disk/memory cache only")
+        if not _props_cache:
+            _load_props_cache_from_disk()
+        return _props_cache
 
     elapsed = _time_mod.time() - _props_cache_ts
     if not force and elapsed < _PROPS_CACHE_TTL:
@@ -8114,6 +8190,7 @@ def get_player_props(force=False):
         _props_cache = all_games
         if all_games:
             _props_cache_hour = 1
+            _save_props_cache_to_disk(all_games)  # persist so restarts don't re-fetch
         else:
             print(f"[Props] No FanDuel props posted yet — retry in {_PROPS_CACHE_TTL//60} min")
         return all_games
@@ -15574,6 +15651,10 @@ def main():
                 print(f"[Startup] _auto_adjust_model already ran today ({_today_adj}) — skipping")
     except Exception as _sae:
         print(f"[Startup] auto_adjust check error: {_sae}")
+
+    # ── Restore persisted state before first run ──────────────────────────────
+    _load_quota_state()           # know how many API calls are left from before restart
+    _load_props_cache_from_disk() # restore last fetched props so restart doesn't burn quota
 
     once = "--once" in sys.argv
 
