@@ -9137,9 +9137,28 @@ def save_bet(bet):
             cur.close(); conn.close()
             return True
         except Exception as e:
-            print(f"[DB] save_bet error: {e}")
-            try: conn.close()
-            except Exception: pass
+            err_str = str(e)
+            print(f"[DB] save_bet error: {err_str}")
+            try:
+                conn.rollback()
+                conn.close()
+            except Exception:
+                pass
+            # Persist the error to bot_status so it shows up in /api/debug/bets
+            try:
+                _ec = _db_conn()
+                if _ec:
+                    _ecur = _ec.cursor()
+                    _ecur.execute(
+                        "INSERT INTO bot_status (key, value) VALUES ('last_save_error', %s) "
+                        "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
+                        (err_str[:500],)
+                    )
+                    _ec.commit()
+                    _ecur.close()
+                    _ec.close()
+            except Exception as _le:
+                print(f"[DB] error log failed: {_le}")
     data = load_bets()
     for b in data:
         if b["game"] == bet["game"] and b["pick"] == bet["pick"] and b.get("betType") == bet.get("betType"):
