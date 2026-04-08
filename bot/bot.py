@@ -8869,6 +8869,7 @@ def save_memory_state():
     """Persist all critical in-memory state to DB so a restart picks up where it left off."""
     global _system_sent_date, _vip_lock_desc, _sgp_sent_games, line_history
     global _elite_props_sent_games, _edge_fade_sent_date, _cgp_sent_date
+    global _last_injury_bulletin
     try:
         save_status(0, {
             "_mem_system_sent_date":     _system_sent_date or "",
@@ -8878,6 +8879,7 @@ def save_memory_state():
             "_mem_elite_props_sent":     list(_elite_props_sent_games),
             "_mem_edge_fade_sent_date":  _edge_fade_sent_date or "",
             "_mem_cgp_sent_date":        _cgp_sent_date or "",
+            "_mem_injury_bulletin_date": _last_injury_bulletin or "",
         })
     except Exception as _sme:
         print(f"[Memory] save_memory_state error: {_sme}")
@@ -8891,6 +8893,7 @@ def restore_memory_state():
     """
     global _system_sent_date, _vip_lock_desc, _sgp_sent_games, line_history
     global _elite_props_sent_games, _edge_fade_sent_date, _cgp_sent_date
+    global _last_injury_bulletin
     import json as _json
 
     # ── 1. Operational flags (send-date guards, VIP state) ────────────────
@@ -8936,6 +8939,12 @@ def restore_memory_state():
         if saved_cgp == today_str:
             _cgp_sent_date = saved_cgp
             print(f"[Memory] Restored _cgp_sent_date: {_cgp_sent_date}")
+
+        # ── Injury bulletin guard ─────────────────────────────────────────
+        saved_inj = st.get("_mem_injury_bulletin_date", "")
+        if saved_inj == today_str:
+            _last_injury_bulletin = saved_inj
+            print(f"[Memory] Restored _last_injury_bulletin: {_last_injury_bulletin}")
 
     except Exception as _rme:
         print(f"[Memory] restore_memory_state error: {_rme}")
@@ -9196,8 +9205,17 @@ def update_results():
             # Unified field names from the normalized dict
             home_name  = g.get("home_team", "")
             away_name  = g.get("away_team", "")
-            name       = f"{home_name} vs {away_name}"
-            if name != b.get("game", "") or g.get("status") != "post":
+            if g.get("status") != "post":
+                continue
+            # Fuzzy game name match — keyword overlap handles format differences
+            # between Odds API ("LAL vs GSW") and BDL ("Los Angeles Lakers vs Golden State Warriors")
+            def _game_match(g_home, g_away, b_game):
+                if f"{g_home} vs {g_away}" == b_game:
+                    return True
+                all_words = set(w.lower() for w in (g_home + " " + g_away).split() if len(w) > 3)
+                bet_words = set(w.lower() for w in str(b_game).split() if len(w) > 3)
+                return len(all_words & bet_words) >= 2
+            if not _game_match(home_name, away_name, b.get("game", "")):
                 continue
 
             home_score    = g.get("home_score", 0) or 0
@@ -10195,7 +10213,7 @@ def send_free_preview():
     today_str = et_now.strftime("%Y-%m-%d")
     if _free_preview_sent == today_str:
         return
-    if et_now.hour != 8:   # only fire during the 8 AM ET hour
+    if not (8 <= et_now.hour < 11):   # fire any time between 8–10 AM ET
         return
 
     # Use already-cached odds data for tip-off times — no extra API call
@@ -13501,17 +13519,16 @@ def send_avoid_list():
     if _avoid_sent_date == today_str:
         return
 
-    # Fire only when games are scheduled today (dynamic — handles afternoon + late games)
-    if not _in_game_window():
+    # Fire between 2 PM and 7 PM ET — well before tip-off on any game night.
+    # No longer gates on status=="pre" since that breaks when games have already
+    # tipped off by the time the bot cycle runs.
+    if not (14 <= et_now.hour < 19):
         return
 
-    # Need at least one game within 3 hours
+    # Need at least one game today (any status)
     try:
         games = get_todays_games()
         if not games:
-            return
-        upcoming = [g for g in games if g.get("status") == "pre"]
-        if not upcoming:
             return
     except Exception:
         return
