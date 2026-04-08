@@ -14249,7 +14249,10 @@ def send_daily_system():
                 and b.get("betType", "") in (
                     "MONEYLINE", "SPREAD", "TOTAL", "OVER", "UNDER",
                     "PROP", "points", "rebounds", "assists", "threes",
-                    "blocks", "steals", "pra", "pr", "pa"
+                    "blocks", "steals", "pra", "pr", "pa",
+                    # These were missing — ELITE_PROP/INDIVIDUAL legs were never
+                    # restored into the parlay pool after a Railway restart
+                    "ELITE_PROP", "INDIVIDUAL", "PLAYER_PROP",
                 )
             ]
             for b in todays_bets:
