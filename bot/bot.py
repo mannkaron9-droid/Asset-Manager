@@ -1611,6 +1611,8 @@ def _get_engine_candidates(filtered_props, all_props, game_data, ht, at, top_n=1
                         if avg_val < 0.5:
                             continue
                         line = round(avg_val - 0.5, 1)
+                        if line < 0.5:          # FanDuel minimum valid line — skip ghost markets
+                            continue
                         candidates.append({
                             "player":         pname,
                             "pick":           "OVER",
@@ -1625,6 +1627,9 @@ def _get_engine_candidates(filtered_props, all_props, game_data, ht, at, top_n=1
                         })
         except Exception as e:
             print(f"[_get_engine_candidates] fallback error: {e}")
+
+    # Final guard: strip any candidate whose line isn't a valid FanDuel number
+    candidates = [c for c in candidates if isinstance(c.get("line"), (int, float)) and float(c["line"]) >= 0.5]
 
     return candidates
 
