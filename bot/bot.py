@@ -2374,6 +2374,130 @@ def cmd_forcesettle(chat_id):
         print(f"[ForceSettle] error: {e}")
 
 
+_cleanup_parlay_done_date = ""   # tracks last date cleanup ran
+
+def _cleanup_parlay_grades():
+    """
+    Post-game cleanup grader for SGP and CGP legs.
+    Runs once per day after all games are Final.
+
+    Strategy per group:
+      1. If ANY leg already has result='loss'  → bust: mark all NULL legs 'loss'
+      2. If ALL legs have result='win'          → already done, skip
+      3. If ALL legs are still NULL             → void (no live data captured)
+      4. Mixed (some win, some NULL, no loss)   → bust is unresolved; void the NULLs
+         so the group doesn't pollute win-rate forever
+    """
+    global _cleanup_parlay_done_date
+    today_et = datetime.now(ET).strftime("%Y-%m-%d")
+    if _cleanup_parlay_done_date == today_et:
+        return
+    _cleanup_parlay_done_date = today_et
+
+    conn = _db_conn()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        total_graded = 0
+        total_voided = 0
+
+        # ── SGP: group by (game, date) ────────────────────────────────────
+        cur.execute("""
+            SELECT game,
+                   DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York') AS bet_date,
+                   COUNT(*)                                        AS total,
+                   COUNT(*) FILTER (WHERE result = 'win')         AS wins,
+                   COUNT(*) FILTER (WHERE result = 'loss')        AS losses,
+                   COUNT(*) FILTER (WHERE result IS NULL
+                                       OR result = 'pending')     AS nulls
+            FROM bets
+            WHERE pick_category = 'SGP'
+              AND (result IS NULL OR result = 'pending')
+            GROUP BY game, bet_date
+            HAVING COUNT(*) FILTER (WHERE result IS NULL OR result = 'pending') > 0
+        """)
+        sgp_groups = cur.fetchall()
+
+        for game, bet_date, total, wins, losses, nulls in sgp_groups:
+            if losses > 0:
+                # Parlay already busted — mark remaining nulls as loss
+                cur.execute("""
+                    UPDATE bets SET result = 'loss'
+                    WHERE pick_category = 'SGP'
+                      AND game = %s
+                      AND DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York') = %s
+                      AND (result IS NULL OR result = 'pending')
+                """, (game, bet_date))
+                total_graded += cur.rowcount
+                print(f"[ParlayCleanup] SGP bust propagated: {game} {bet_date} — {cur.rowcount} legs → loss")
+            else:
+                # All still NULL or some win + remaining NULL — void unresolvable nulls
+                cur.execute("""
+                    UPDATE bets SET result = 'void'
+                    WHERE pick_category = 'SGP'
+                      AND game = %s
+                      AND DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York') = %s
+                      AND (result IS NULL OR result = 'pending')
+                """, (game, bet_date))
+                total_voided += cur.rowcount
+                print(f"[ParlayCleanup] SGP voided unresolvable: {game} {bet_date} — {cur.rowcount} legs")
+
+        # ── CGP: group by date ────────────────────────────────────────────
+        cur.execute("""
+            SELECT DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York') AS bet_date,
+                   COUNT(*)                                        AS total,
+                   COUNT(*) FILTER (WHERE result = 'win')         AS wins,
+                   COUNT(*) FILTER (WHERE result = 'loss')        AS losses,
+                   COUNT(*) FILTER (WHERE result IS NULL
+                                       OR result = 'pending')     AS nulls
+            FROM bets
+            WHERE pick_category IN ('CROSS_GAME_PARLAY', 'CROSS_SGP')
+              AND (result IS NULL OR result = 'pending')
+            GROUP BY bet_date
+            HAVING COUNT(*) FILTER (WHERE result IS NULL OR result = 'pending') > 0
+        """)
+        cgp_groups = cur.fetchall()
+
+        for bet_date, total, wins, losses, nulls in cgp_groups:
+            if losses > 0:
+                cur.execute("""
+                    UPDATE bets SET result = 'loss'
+                    WHERE pick_category IN ('CROSS_GAME_PARLAY', 'CROSS_SGP')
+                      AND DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York') = %s
+                      AND (result IS NULL OR result = 'pending')
+                """, (bet_date,))
+                total_graded += cur.rowcount
+                print(f"[ParlayCleanup] CGP bust propagated: {bet_date} — {cur.rowcount} legs → loss")
+            else:
+                cur.execute("""
+                    UPDATE bets SET result = 'void'
+                    WHERE pick_category IN ('CROSS_GAME_PARLAY', 'CROSS_SGP')
+                      AND DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York') = %s
+                      AND (result IS NULL OR result = 'pending')
+                """, (bet_date,))
+                total_voided += cur.rowcount
+                print(f"[ParlayCleanup] CGP voided unresolvable: {bet_date} — {cur.rowcount} legs")
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        if total_graded or total_voided:
+            summary = f"[ParlayCleanup] Done — {total_graded} graded (busted), {total_voided} voided"
+            print(summary)
+            try:
+                reply(ADMIN_ID, f"🧹 Parlay cleanup: {total_graded} legs graded as loss (bust), {total_voided} voided (no data).")
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[ParlayCleanup] error: {e}")
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def cmd_debugsettle(chat_id):
     """
     /debugsettle — Admin: show first 5 unsettled neutral_prop rows and
@@ -16373,6 +16497,10 @@ def main():
                 # No clock guard — bot detects Final state from live data directly
                 _adj_today = datetime.now(ET).strftime("%Y-%m-%d")
                 if _all_done and _auto_adjust_done_date != _adj_today:
+                    try:
+                        _cleanup_parlay_grades()
+                    except Exception as _cpg_err:
+                        print(f"[ParlayCleanup] error: {_cpg_err}")
                     try:
                         _auto_adjust_done_date = _adj_today
                         _auto_adjust_model()
