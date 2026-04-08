@@ -3507,3 +3507,117 @@ def get_ft_rate_signal(conn, player_name: str, stat_type: str,
         return 1.0
     except Exception:
         return 1.0
+
+
+# NBA team full name → official abbreviation mapping
+_NBA_TEAM_ABBR = {
+    "Atlanta Hawks": "ATL",          "Boston Celtics": "BOS",
+    "Brooklyn Nets": "BKN",          "Charlotte Hornets": "CHA",
+    "Chicago Bulls": "CHI",          "Cleveland Cavaliers": "CLE",
+    "Dallas Mavericks": "DAL",       "Denver Nuggets": "DEN",
+    "Detroit Pistons": "DET",        "Golden State Warriors": "GSW",
+    "Houston Rockets": "HOU",        "Indiana Pacers": "IND",
+    "LA Clippers": "LAC",            "Los Angeles Clippers": "LAC",
+    "Los Angeles Lakers": "LAL",     "LA Lakers": "LAL",
+    "Memphis Grizzlies": "MEM",      "Miami Heat": "MIA",
+    "Milwaukee Bucks": "MIL",        "Minnesota Timberwolves": "MIN",
+    "New Orleans Pelicans": "NOP",   "New York Knicks": "NYK",
+    "Oklahoma City Thunder": "OKC",  "Orlando Magic": "ORL",
+    "Philadelphia 76ers": "PHI",     "Phoenix Suns": "PHX",
+    "Portland Trail Blazers": "POR", "Sacramento Kings": "SAC",
+    "San Antonio Spurs": "SAS",      "Toronto Raptors": "TOR",
+    "Utah Jazz": "UTA",              "Washington Wizards": "WAS",
+}
+
+
+def get_matchup_signal(conn, player_name: str, stat_type: str) -> float:
+    """
+    Returns a confidence multiplier based on the season-long player-vs-player
+    defensive matchup data (from player_matchups table, populated daily from
+    stats.nba.com/stats/leagueseasonmatchups).
+
+    Identifies the primary defender (most possession minutes) assigned to
+    this offensive player from today's opponent team, then scores their
+    matchup FG% / 3PT% against league averages.
+
+    stat_type "points" → uses matchup_fg_pct  (league avg ≈ 0.46)
+    stat_type "threes" → uses matchup_fg3_pct (league avg ≈ 0.36)
+    Other stat types   → returns 1.0 (neutral)
+
+    Returns 1.0 if matchup data not yet available (fresh DB, off-season).
+    """
+    if stat_type not in ("points", "threes"):
+        return 1.0
+
+    try:
+        cur = conn.cursor()
+        # 1. Get today's opponent for this player (most recent observation)
+        cur.execute("""
+            SELECT opponent FROM player_observations
+            WHERE player_name = %s AND opponent IS NOT NULL AND opponent != ''
+            ORDER BY observed_at DESC LIMIT 1
+        """, (player_name,))
+        row = cur.fetchone()
+        cur.close()
+        if not row:
+            return 1.0
+        opp_full = row[0].strip()
+
+        # 2. Convert full team name → abbreviation
+        opp_abbr = _NBA_TEAM_ABBR.get(opp_full, "")
+        if not opp_abbr:
+            # Fallback: try last-word match (e.g., "Bucks" → "MIL")
+            _kw = opp_full.split()[-1].upper()
+            for name, abbr in _NBA_TEAM_ABBR.items():
+                if name.upper().endswith(_kw):
+                    opp_abbr = abbr
+                    break
+        if not opp_abbr:
+            return 1.0
+
+        # 3. Find primary defender on that team for this player
+        cur2 = conn.cursor()
+        cur2.execute("""
+            SELECT matchup_fg_pct, matchup_fg3_pct, partial_poss, def_player
+            FROM player_matchups
+            WHERE off_player ILIKE %s
+              AND def_team   = %s
+              AND partial_poss >= 3
+            ORDER BY partial_poss DESC
+            LIMIT 1
+        """, (player_name, opp_abbr))
+        mr = cur2.fetchone()
+        cur2.close()
+
+        if not mr:
+            return 1.0
+
+        fg_pct, fg3_pct, poss, def_name = mr
+        fg_pct  = float(fg_pct  or 0)
+        fg3_pct = float(fg3_pct or 0)
+
+        print(f"[Matchup] {player_name} vs {def_name} ({opp_abbr}) — "
+              f"FG%={fg_pct:.3f} 3P%={fg3_pct:.3f} over {poss:.0f} poss")
+
+        # 4. Score vs league averages
+        if stat_type == "points":
+            # League avg contested FG% ≈ 0.41 (tighter than open FG%)
+            if fg_pct >= 0.50:   return 1.10   # Feasts on this defender
+            if fg_pct >= 0.46:   return 1.05
+            if fg_pct <= 0.32:   return 0.88   # Elite lock-down matchup
+            if fg_pct <= 0.37:   return 0.94
+            return 1.0
+
+        if stat_type == "threes":
+            # League avg contested 3PT% ≈ 0.33
+            if fg3_pct >= 0.42:  return 1.10   # Shoots well vs this defender
+            if fg3_pct >= 0.38:  return 1.05
+            if fg3_pct <= 0.25:  return 0.89   # Gets locked up from three
+            if fg3_pct <= 0.30:  return 0.94
+            return 1.0
+
+    except Exception as e:
+        print(f"[Matchup] signal error {player_name}: {e}")
+        return 1.0
+
+    return 1.0
