@@ -13516,6 +13516,8 @@ def send_avoid_list():
         et_now = datetime.utcnow()
 
     today_str = et_now.strftime("%Y-%m-%d")
+    # Restore from DB on first call after a restart
+    _avoid_sent_date = _avoid_sent_date or load_status().get("_avoid_sent_date", "")
     if _avoid_sent_date == today_str:
         return
 
@@ -13657,6 +13659,7 @@ def send_avoid_list():
     msg = "\n".join(lines)
     send(msg, VIP_CHANNEL)
     _avoid_sent_date = today_str
+    save_status(0, {"_avoid_sent_date": today_str})
     print(f"[Avoid] Sent — {len(avoid_players)} avoid, {len(injury_flags)} injuries")
 
 
