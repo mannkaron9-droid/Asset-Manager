@@ -457,7 +457,8 @@ model = _load_model()
 # 📡 TELEGRAM
 # ==========================
 def send(msg, chat):
-    """Send a Telegram message with up to 3 retry attempts on timeout/error."""
+    """Send a Telegram message with up to 3 retry attempts on timeout/error.
+    On a 400 parse error (broken Markdown) automatically retries as plain text."""
     if not BOT_TOKEN or not chat:
         return
     for attempt in range(1, 4):
@@ -467,19 +468,24 @@ def send(msg, chat):
                 json={"chat_id": chat, "text": msg, "parse_mode": "Markdown"},
                 timeout=15
             )
-            # Telegram responded — message was received, do NOT retry regardless
-            # of status code (retrying here would send duplicates)
             if not resp.ok:
                 print(f"[Telegram] send HTTP {resp.status_code}: {resp.text[:120]}")
+                # Markdown parse error — retry once as plain text so message isn't lost
+                if resp.status_code == 400 and "parse" in resp.text.lower():
+                    resp2 = requests.post(
+                        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                        json={"chat_id": chat, "text": msg},
+                        timeout=15
+                    )
+                    if not resp2.ok:
+                        print(f"[Telegram] plain-text fallback also failed: {resp2.text[:80]}")
             return
         except (requests.exceptions.Timeout,
                 requests.exceptions.ConnectionError) as e:
-            # Network/timeout before any response — message definitely not sent, safe to retry
             print(f"[Telegram] send attempt {attempt}/3 network error: {e}")
             if attempt < 3:
                 time.sleep(2)
         except Exception as e:
-            # Unexpected error — log and stop, don't risk duplicate
             print(f"[Telegram] send unexpected error: {e}")
             return
     print(f"[Telegram] send gave up after 3 attempts (chat={chat})")
@@ -8622,6 +8628,7 @@ _odds_quota_remaining: int = 999   # last known remaining count — persisted ac
 
 def _db_upsert_cache(key: str, payload: dict):
     """Write a JSON payload to learning_data. Used for all cross-restart caching."""
+    import json as _json
     try:
         conn = _db_conn()
         if not conn:
@@ -8642,6 +8649,7 @@ def _db_upsert_cache(key: str, payload: dict):
 
 def _db_load_cache(key: str) -> dict:
     """Read a JSON payload from learning_data. Returns {} if missing or error."""
+    import json as _json
     try:
         conn = _db_conn()
         if not conn:
@@ -12578,7 +12586,7 @@ def run_full_system():
                     })
                 except Exception:
                     pass
-            print(f"  {game}: props sent ({len(player_data)} players, {len(all_elite_lines)} elite picks)")
+            print(f"  {game}: props sent ({len(player_data)} players, {len(elite_picks)} elite picks)")
 
         return all_picks
 
