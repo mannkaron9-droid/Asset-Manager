@@ -14118,6 +14118,7 @@ def _should_fire_prop_wave() -> bool:
     """
     Returns True exactly once per day when ET time >= earliest tip-off minus 2 hours.
     Uses the schedule cache (already populated by send_daily_system) — no extra API call.
+    Persists fired date to DB so restarts don't re-fire and burn quota.
     """
     global _prop_wave_fired
     import zoneinfo as _zi
@@ -14127,6 +14128,11 @@ def _should_fire_prop_wave() -> bool:
         et_now = datetime.utcnow()
 
     today_str = et_now.strftime("%Y-%m-%d")
+
+    # Restore from DB on first call after a restart — prevents re-firing after crash
+    if _prop_wave_fired is None:
+        _prop_wave_fired = load_status().get("_prop_wave_date", "")
+
     if _prop_wave_fired == today_str:
         return False
 
@@ -14230,6 +14236,7 @@ def _fire_prop_wave():
         print(f"[PropWave] per-game send error: {_by_err}")
 
     _prop_wave_fired = today_str
+    save_status(0, {"_prop_wave_date": today_str})   # persist — restart-safe, no re-fire
     print(f"[PropWave] Complete — {len(_todays_parlay_legs)} total legs in pool")
 
 
