@@ -14114,6 +14114,44 @@ def send_cgp(parlay_pool=None):
             unique_legs = [l for l in unique_legs if l["desc"] != _vip_lock_desc]
         parlay_pool = unique_legs
 
+    # ── Team gate: strip any leg whose player isn't on the game's teams ───────
+    # Catches stale Garland-type legs saved to DB before the team gate was added
+    # to run_full_system(). Uses BDL stats cache (fast — already cached in DB).
+    def _cgp_leg_valid(leg):
+        _game = (leg.get("game") or "").strip()
+        if not _game or " @ " not in _game:
+            return True   # no game info — can't validate, allow through
+        _away_t, _home_t = _game.split(" @ ", 1)
+        _gkw = {w for w in (_away_t + " " + _home_t).lower().split() if len(w) > 3}
+
+        # 1. Stored team field
+        _lt = (leg.get("team") or "").lower().strip()
+        if _lt:
+            if any(w in _gkw for w in _lt.split() if len(w) > 3):
+                return True
+            # Stored team doesn't match — do BDL lookup before rejecting
+        # 2. BDL stats lookup (session-cached / DB-cached — cheap)
+        _player = (leg.get("player") or "").strip()
+        if _player:
+            try:
+                _st = get_player_stats(_player)
+                _bt = ((_st or {}).get("team") or "").lower().strip()
+                if _bt:
+                    if any(w in _gkw for w in _bt.split() if len(w) > 3):
+                        return True
+                    print(f"[CGP TeamGate] {_player} plays for '{_bt}' — not in '{_game}', dropped")
+                    return False
+            except Exception:
+                pass
+        # No team info at all — allow (game is already set so probably fine)
+        return True
+
+    _before_gate = len(parlay_pool)
+    parlay_pool = [l for l in parlay_pool if _cgp_leg_valid(l)]
+    _dropped = _before_gate - len(parlay_pool)
+    if _dropped:
+        print(f"[CGP] Dropped {_dropped} wrong-game leg(s) from pool")
+
     if len(parlay_pool) < 3:
         print("[CGP] Not enough legs to build a cross-game parlay")
         return
