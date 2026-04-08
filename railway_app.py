@@ -260,10 +260,28 @@ def healthcheck():
 @app.route("/api/bot/status", methods=["GET"])
 def bot_status():
     status = load_status()
+    # Always count today's picks from DB so counter survives redeploys
+    picks_today = status.get("picksToday", 0)
+    conn = _db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT COUNT(*) FROM bets
+                WHERE DATE(COALESCE(bet_time, created_at)) = CURRENT_DATE
+            """)
+            row = cur.fetchone()
+            cur.close(); conn.close()
+            if row and row[0]:
+                picks_today = int(row[0])
+        except Exception as e:
+            print(f"[status] picks_today query error: {e}")
+            try: conn.close()
+            except Exception: pass
     return jsonify({
         "running": bot_thread.is_alive(),
         "lastRun": status.get("lastRun"),
-        "picksToday": status.get("picksToday", 0),
+        "picksToday": picks_today,
     })
 
 
