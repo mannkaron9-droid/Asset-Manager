@@ -515,6 +515,21 @@ def build_slip_from_props(
                         leg.confidence = round(leg.confidence - 2.0, 1)
                         adj_log.append("is_cold -2.0")
 
+                    # 6. Shot efficiency signal — from CDN play-by-play history
+                    try:
+                        from bot.decision_engine import get_shot_efficiency_signal as _gses
+                        from bot.bot import _db_conn as _dbc
+                        _se_conn = _dbc()
+                        if _se_conn:
+                            _se_mult = _gses(_se_conn, player, prop_type)
+                            _se_conn.close()
+                            if _se_mult != 1.0:
+                                _se_adj = round((leg.confidence * _se_mult) - leg.confidence, 1)
+                                leg.confidence = round(leg.confidence * _se_mult, 1)
+                                adj_log.append(f"shot_eff {_se_adj:+.1f}")
+                    except Exception:
+                        pass
+
                     # Clamp final confidence to valid range
                     leg.confidence = max(0.0, min(99.0, leg.confidence))
 
@@ -759,6 +774,18 @@ def get_top_candidates(
                             hist_adj = float(stats.get("confidence_adj", 0.0))
                         if hist_adj != 0.0:
                             base_conf = base_conf + hist_adj
+
+                        # ── Shot efficiency signal from CDN play-by-play ──────
+                        try:
+                            from bot.decision_engine import get_shot_efficiency_signal as _gses2
+                            from bot.bot import _db_conn as _dbc2
+                            _se2_conn = _dbc2()
+                            if _se2_conn:
+                                _se2_mult = _gses2(_se2_conn, player, prop["prop_type"])
+                                _se2_conn.close()
+                                base_conf = base_conf * _se2_mult
+                        except Exception:
+                            pass
 
                         base_conf = max(0.0, min(99.0, base_conf))
 
