@@ -15074,6 +15074,17 @@ def send_elite_player_props(game_name, game_legs):
     else:
         away_team, home_team = "Away", "Home"
 
+    # ── Strip legs whose player doesn't belong to either team ────────
+    _ep_kw = {w for w in (away_team + " " + home_team).lower().split() if len(w) > 3}
+    def _ep_leg_ok(leg):
+        lt = (leg.get("team") or "").lower().strip()
+        if not lt:
+            return True
+        return any(w in _ep_kw for w in lt.split() if len(w) > 3)
+    game_legs = [l for l in game_legs if _ep_leg_ok(l)]
+    if not game_legs:
+        return
+
     # ── Get key players per team via ESPN starters ────────────────────
     def _starters(team):
         try:
@@ -15338,6 +15349,34 @@ def send_sgp_for_game(game_name, game_legs):
         if l.get("desc") != _vip_lock_desc
         and (l.get("bet_type") or l.get("betType") or "").upper() not in _SGP_EXCLUDE_TYPES
     ]
+
+    # ── Validate each leg's player belongs to one of the two teams ────
+    # The Odds API sometimes assigns a player to the wrong game event
+    # (e.g. Darius Garland appearing in Dallas @ LA Clippers instead of
+    # his Cavaliers game).  Filter any leg whose stored team doesn't match
+    # either team keyword in game_name.
+    if " @ " in game_name:
+        _sgp_away, _sgp_home = game_name.split(" @ ", 1)
+    else:
+        _sgp_away, _sgp_home = "Away", game_name
+    # Build meaningful keywords (skip short words like "at", "los")
+    _sgp_team_kw = {
+        w for w in (_sgp_away + " " + _sgp_home).lower().split()
+        if len(w) > 3
+    }
+
+    def _leg_belongs_to_game(leg):
+        leg_team = (leg.get("team") or "").lower().strip()
+        if not leg_team:
+            return True   # no team stored — can't validate, allow through
+        return any(w in _sgp_team_kw for w in leg_team.split() if len(w) > 3)
+
+    _before = len(pool)
+    pool = [l for l in pool if _leg_belongs_to_game(l)]
+    _filtered = _before - len(pool)
+    if _filtered:
+        print(f"[SGP:{game_name}] Dropped {_filtered} leg(s) whose player team doesn't match this game")
+
     if len(pool) < 2:
         return
 
@@ -15459,7 +15498,23 @@ def send_sgp_for_game(game_name, game_legs):
         if _pk:
             _seen.add(_pk)
         _deduped.append(_leg)
-    pool_sorted = _deduped
+
+    # ── Per-player cap: max 2 legs per player in any SGP ─────────────
+    # Prevents a single player (e.g. Jalen Green) from dominating the
+    # SGP with 3 nearly-identical combo props (PTS+REB, PTS+AST, PRA).
+    _player_leg_count: dict = {}
+    _MAX_LEGS_PER_PLAYER = 2
+    _capped: list = []
+    for _leg in _deduped:
+        _pl = (_leg.get("player") or "").strip().lower()
+        if not _pl:
+            _capped.append(_leg)
+            continue
+        if _player_leg_count.get(_pl, 0) >= _MAX_LEGS_PER_PLAYER:
+            continue
+        _player_leg_count[_pl] = _player_leg_count.get(_pl, 0) + 1
+        _capped.append(_leg)
+    pool_sorted = _capped
 
     # ── Script filter — use full 5-dimension GameScript if available ──
     # Falls back to the legacy single-dimension fits_script only if the
