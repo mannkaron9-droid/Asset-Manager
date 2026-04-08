@@ -15927,13 +15927,30 @@ def send_sgp_for_game(game_name, game_legs):
     bal_size  = _random.randint(4, 6)
     agg_size  = _random.randint(6, 8)
 
-    safe       = _greedy_pick(script_pool, safe_size, "primary")
-    balanced   = _greedy_pick(script_pool, bal_size,  "primary+secondary")
-    aggressive = _greedy_pick(script_pool, agg_size,  "all")
+    # SAFE: best primary-fit legs
+    safe = _greedy_pick(script_pool, safe_size, "primary")
+    if len(safe) < 2:
+        safe = script_pool[:safe_size]
 
-    if len(safe) < 2:       safe       = script_pool[:safe_size]
-    if len(balanced) < 4:   balanced   = script_pool[:min(bal_size,  len(script_pool))]
-    if len(aggressive) < 4: aggressive = script_pool[:min(agg_size,  len(script_pool))]
+    # BALANCED: start from SAFE legs, then add primary+secondary legs up to bal_size
+    _safe_descs  = {l.get("desc") for l in safe}
+    _bal_extras  = _greedy_pick(
+        [l for l in script_pool if l.get("desc") not in _safe_descs],
+        max(0, bal_size - len(safe)), "primary+secondary"
+    )
+    balanced = safe + _bal_extras
+    if len(balanced) < 2:
+        balanced = script_pool[:min(bal_size, len(script_pool))]
+
+    # AGGRESSIVE: start from BALANCED legs, then add any remaining legs up to agg_size
+    _bal_descs   = {l.get("desc") for l in balanced}
+    _agg_extras  = _greedy_pick(
+        [l for l in script_pool if l.get("desc") not in _bal_descs],
+        max(0, agg_size - len(balanced)), "all"
+    )
+    aggressive = balanced + _agg_extras
+    if len(aggressive) < 2:
+        aggressive = script_pool[:min(agg_size, len(script_pool))]
 
     # ── FanDuel-style leg formatter ───────────────────────────────────
     _ICON = {
