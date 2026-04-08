@@ -515,7 +515,7 @@ def build_slip_from_props(
                         leg.confidence = round(leg.confidence - 2.0, 1)
                         adj_log.append("is_cold -2.0")
 
-                    # 6. Shot efficiency + extended signals from CDN play-by-play
+                    # 6. Shot efficiency + extended signals + matchup
                     try:
                         from bot.decision_engine import (
                             get_shot_efficiency_signal as _gses,
@@ -523,6 +523,7 @@ def build_slip_from_props(
                             get_opp_defense_signal    as _gods,
                             get_turnover_signal       as _gts,
                             get_ft_rate_signal        as _gfts,
+                            get_matchup_signal        as _gms,
                         )
                         from bot.bot import _db_conn as _dbc
                         _se_conn = _dbc()
@@ -533,6 +534,7 @@ def build_slip_from_props(
                             _combined_mult *= _gods (_se_conn, player, prop_type)
                             _combined_mult *= _gts  (_se_conn, player, prop_type)
                             _combined_mult *= _gfts (_se_conn, player, prop_type)
+                            _combined_mult *= _gms  (_se_conn, player, prop_type)
                             _se_conn.close()
                             if _combined_mult != 1.0:
                                 _se_adj = round((leg.confidence * _combined_mult) - leg.confidence, 1)
@@ -786,7 +788,7 @@ def get_top_candidates(
                         if hist_adj != 0.0:
                             base_conf = base_conf + hist_adj
 
-                        # ── Extended signals from CDN play-by-play ────────────
+                        # ── Extended signals + matchup ────────────────────────
                         try:
                             from bot.decision_engine import (
                                 get_shot_efficiency_signal as _gses2,
@@ -794,6 +796,7 @@ def get_top_candidates(
                                 get_opp_defense_signal    as _gods2,
                                 get_turnover_signal       as _gts2,
                                 get_ft_rate_signal        as _gfts2,
+                                get_matchup_signal        as _gms2,
                             )
                             from bot.bot import _db_conn as _dbc2
                             _se2_conn = _dbc2()
@@ -805,6 +808,7 @@ def get_top_candidates(
                                 _m2 *= _gods2(_se2_conn, player, _pt2)
                                 _m2 *= _gts2 (_se2_conn, player, _pt2)
                                 _m2 *= _gfts2(_se2_conn, player, _pt2)
+                                _m2 *= _gms2 (_se2_conn, player, _pt2)
                                 _se2_conn.close()
                                 base_conf = base_conf * _m2
                         except Exception:
