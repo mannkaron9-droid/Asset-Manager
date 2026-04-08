@@ -144,7 +144,9 @@ def load_bets():
             cur = conn.cursor()
             cur.execute("""
                 SELECT game, player, pick, bet_type, line, prediction,
-                       odds, prob, edge, confidence, result, bet_time, tier, script
+                       odds, prob, edge, confidence, result,
+                       COALESCE(bet_time, created_at) AS time,
+                       tier, script
                 FROM bets ORDER BY COALESCE(bet_time, created_at) ASC
             """)
             rows = cur.fetchall()
