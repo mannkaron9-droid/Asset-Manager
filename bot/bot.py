@@ -11253,7 +11253,7 @@ def retrain_from_results():
                 SELECT script, COUNT(*), SUM(CASE WHEN result='win' THEN 1 ELSE 0 END)
                 FROM bets
                 WHERE script IS NOT NULL AND result IN ('win','loss')
-                  AND script LIKE '%\_%' ESCAPE '\'
+                  AND script LIKE '%\\_%' ESCAPE '\\'
                 GROUP BY script
                 HAVING COUNT(*) >= 5
                 ORDER BY COUNT(*) DESC
