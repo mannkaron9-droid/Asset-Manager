@@ -502,6 +502,46 @@ def debug_schema():
         return jsonify({"error": str(e)})
 
 
+@app.route("/api/debug/reset-quota", methods=["POST", "GET"])
+def reset_quota():
+    """Reset the cached Odds API quota so the bot will call the API again."""
+    import json as _j
+    new_val = int(request.args.get("val", 500))
+    result = {}
+
+    # 1. Reset in-memory variable on the running bot module
+    if _bot_module is not None:
+        try:
+            _bot_module._odds_quota_remaining = new_val
+            result["in_memory"] = f"reset to {new_val}"
+        except Exception as e:
+            result["in_memory"] = f"error: {e}"
+    else:
+        result["in_memory"] = "bot not started yet"
+
+    # 2. Update the DB cache so it persists across restarts
+    conn = _db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            payload = _j.dumps({"remaining": new_val, "updated": datetime.utcnow().isoformat()})
+            cur.execute(
+                "INSERT INTO learning_data (key, value) VALUES ('odds_quota_state', %s) "
+                "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
+                (payload,)
+            )
+            conn.commit(); cur.close(); conn.close()
+            result["db"] = f"odds_quota_state set to {new_val}"
+        except Exception as e:
+            result["db"] = f"error: {e}"
+            try: conn.close()
+            except Exception: pass
+    else:
+        result["db"] = "no db connection"
+
+    return jsonify({"ok": True, "new_quota": new_val, **result})
+
+
 # ── Schedule ───────────────────────────────────────────────────────────────────
 @app.route("/api/schedule", methods=["GET"])
 def get_schedule():
@@ -858,11 +898,16 @@ def root():
 
 
 # ── Start bot in background ────────────────────────────────────────────────────
+_bot_module = None   # exposed so reset-quota endpoint can write the in-memory value
+
+
 def _start_bot():
+    global _bot_module
     import time, traceback
     while True:
         try:
             import bot.bot as bot_module
+            _bot_module = bot_module
             bot_module.main()
             print("[railway] Bot exited cleanly — stopping thread", flush=True)
             break
