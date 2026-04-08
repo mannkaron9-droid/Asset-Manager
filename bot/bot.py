@@ -4636,12 +4636,15 @@ def _refresh_matchup_data(season: str = "2024-25") -> None:
             print(f"[Matchup] Done — {rows_written:,} matchup pairs upserted")
 
         except Exception as e:
-            print(f"[Matchup] Parse/write error: {e}")
+            print(f"[Matchup] DB write error: {e}")
         finally:
             try:
                 conn.close()
             except Exception:
                 pass
+
+    except Exception as e:
+        print(f"[Matchup] Parse error: {e}")
 
 
 def _cdn_live_tracker():
