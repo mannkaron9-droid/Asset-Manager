@@ -14414,7 +14414,9 @@ def _build_cross_game_parlay(pool):
 
     # ── Greedy cross-game selection ───────────────────────────────────
     # score = edge × role_fit + dep_bonus (cross-pool dependency)
-    def _leg_score_cgp(leg, selected, role_filter, volatile_count, game_counts, max_per_game):
+    _HIGH_VARIANCE = {"threes", "blocks", "steals", "fg3m", "3s", "blk", "stl"}
+
+    def _leg_score_cgp(leg, selected, role_filter, volatile_count, game_counts, max_per_game, hv_count):
         gname    = leg.get("game", "")
         dominant = game_meta.get(gname, {}).get("dominant", "COMPETITIVE")
 
@@ -14425,6 +14427,11 @@ def _build_cross_game_parlay(pool):
         # Volatile script cap (SAFE: 1 per type; BALANCED/AGGRESSIVE: 2 per type)
         vol_cap = 1 if role_filter == "primary" else 2
         if dominant in _VOLATILE and volatile_count.get(dominant, 0) >= vol_cap:
+            return -1.0
+
+        # High-variance prop cap — max 2 blocks/steals/threes per parlay
+        bt = (leg.get("bet_type") or "").lower()
+        if bt in _HIGH_VARIANCE and hv_count[0] >= 2:
             return -1.0
 
         # Intra-game correlation gate: 2nd+ leg per game must correlate with 1st
@@ -14450,15 +14457,16 @@ def _build_cross_game_parlay(pool):
         return edge * max(rf, 0.1) + dep
 
     def _greedy_cgp(candidates, size, role_filter, max_per_game):
-        selected      = []
-        remaining     = list(candidates)
-        game_counts   = {}
+        selected       = []
+        remaining      = list(candidates)
+        game_counts    = {}
         volatile_count = {}
+        hv_count       = [0]   # mutable counter for high-variance props (blocks/steals/threes)
         for _ in range(size):
             if not remaining:
                 break
             scores = [
-                (l, _leg_score_cgp(l, selected, role_filter, volatile_count, game_counts, max_per_game))
+                (l, _leg_score_cgp(l, selected, role_filter, volatile_count, game_counts, max_per_game, hv_count))
                 for l in remaining
             ]
             scores = [(l, s) for l, s in scores if s >= 0]
@@ -14469,9 +14477,11 @@ def _build_cross_game_parlay(pool):
             remaining.remove(best)
             gname    = best.get("game", "")
             dominant = game_meta.get(gname, {}).get("dominant", "COMPETITIVE")
-            game_counts[gname]      = game_counts.get(gname, 0) + 1
+            game_counts[gname] = game_counts.get(gname, 0) + 1
             if dominant in _VOLATILE:
                 volatile_count[dominant] = volatile_count.get(dominant, 0) + 1
+            if (best.get("bet_type") or "").lower() in _HIGH_VARIANCE:
+                hv_count[0] += 1
         return selected
 
     safe_size = random.randint(2, 4)
@@ -14480,7 +14490,7 @@ def _build_cross_game_parlay(pool):
 
     safe       = _greedy_cgp(script_pool, safe_size, "primary",          max_per_game=1)
     balanced   = _greedy_cgp(script_pool, bal_size,  "primary+secondary", max_per_game=2)
-    aggressive = _greedy_cgp(script_pool, agg_size,  "all",              max_per_game=3)
+    aggressive = _greedy_cgp(script_pool, agg_size,  "all",              max_per_game=2)
 
     # ── Fallbacks — ensure minimum viable tiers ───────────────────────
     if len(safe) < 2:
