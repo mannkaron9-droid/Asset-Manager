@@ -3550,13 +3550,20 @@ def get_matchup_signal(conn, player_name: str, stat_type: str) -> float:
         return 1.0
 
     try:
+        from datetime import date as _date, timedelta as _td
+        _today_str = _date.today().isoformat()
+        _cutoff    = (_date.today() - _td(days=2)).isoformat()
+
         cur = conn.cursor()
-        # 1. Get today's opponent for this player (most recent observation)
+        # 1. Get today's opponent — only look at observations from last 2 days
+        #    to avoid pulling a stale opponent from weeks ago
         cur.execute("""
             SELECT opponent FROM player_observations
-            WHERE player_name = %s AND opponent IS NOT NULL AND opponent != ''
+            WHERE player_name = %s
+              AND opponent IS NOT NULL AND opponent != ''
+              AND game_date >= %s
             ORDER BY observed_at DESC LIMIT 1
-        """, (player_name,))
+        """, (player_name, _cutoff))
         row = cur.fetchone()
         cur.close()
         if not row:
