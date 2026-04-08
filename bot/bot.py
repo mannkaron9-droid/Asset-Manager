@@ -9269,6 +9269,8 @@ def save_memory_state():
     global _system_sent_date, _vip_lock_desc, _sgp_sent_games, line_history
     global _elite_props_sent_games, _edge_fade_sent_date, _cgp_sent_date
     global _last_injury_bulletin
+    global _odds_game_fetch_date, _game_cluster_fetched
+    global _shot_alerts_sent, _pbp_last_action
     try:
         save_status(0, {
             "_mem_system_sent_date":     _system_sent_date or "",
@@ -9279,6 +9281,12 @@ def save_memory_state():
             "_mem_edge_fade_sent_date":  _edge_fade_sent_date or "",
             "_mem_cgp_sent_date":        _cgp_sent_date or "",
             "_mem_injury_bulletin_date": _last_injury_bulletin or "",
+            # ── Quota protection: odds fetch guards ────────────────────────
+            "_mem_odds_fetch_date":      _odds_game_fetch_date,
+            "_mem_cluster_fetched":      list(_game_cluster_fetched),
+            # ── Live-game continuity: prevent duplicate alerts on restart ──
+            "_mem_shot_alerts_sent":     {k: v for k, v in _shot_alerts_sent.items()},
+            "_mem_pbp_last_action":      {k: v for k, v in _pbp_last_action.items()},
         })
     except Exception as _sme:
         print(f"[Memory] save_memory_state error: {_sme}")
@@ -9293,6 +9301,8 @@ def restore_memory_state():
     global _system_sent_date, _vip_lock_desc, _sgp_sent_games, line_history
     global _elite_props_sent_games, _edge_fade_sent_date, _cgp_sent_date
     global _last_injury_bulletin
+    global _odds_game_fetch_date, _game_cluster_fetched
+    global _shot_alerts_sent, _pbp_last_action
     import json as _json
 
     # ── 1. Operational flags (send-date guards, VIP state) ────────────────
@@ -9344,6 +9354,28 @@ def restore_memory_state():
         if saved_inj == today_str:
             _last_injury_bulletin = saved_inj
             print(f"[Memory] Restored _last_injury_bulletin: {_last_injury_bulletin}")
+
+        # ── Odds API quota guards ─────────────────────────────────────────
+        saved_ofd = st.get("_mem_odds_fetch_date", {})
+        if isinstance(saved_ofd, dict):
+            _odds_game_fetch_date.update(saved_ofd)
+            print(f"[Memory] Restored _odds_game_fetch_date: {_odds_game_fetch_date}")
+
+        saved_clusters = st.get("_mem_cluster_fetched", [])
+        if isinstance(saved_clusters, list) and saved_clusters:
+            _game_cluster_fetched.update(saved_clusters)
+            print(f"[Memory] Restored _game_cluster_fetched: {len(_game_cluster_fetched)} keys")
+
+        # ── Live-game continuity (no duplicate hot/cold alerts on restart) ─
+        saved_alerts = st.get("_mem_shot_alerts_sent", {})
+        if isinstance(saved_alerts, dict):
+            _shot_alerts_sent.update({k: float(v) for k, v in saved_alerts.items()})
+            print(f"[Memory] Restored _shot_alerts_sent: {len(_shot_alerts_sent)} players")
+
+        saved_pbp = st.get("_mem_pbp_last_action", {})
+        if isinstance(saved_pbp, dict):
+            _pbp_last_action.update({k: int(v) for k, v in saved_pbp.items()})
+            print(f"[Memory] Restored _pbp_last_action: {len(_pbp_last_action)} games")
 
     except Exception as _rme:
         print(f"[Memory] restore_memory_state error: {_rme}")
