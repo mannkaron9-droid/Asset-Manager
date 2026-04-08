@@ -12548,9 +12548,9 @@ def run_full_system():
                                     "role":       _prop_role_tag,
                                 })
 
-                    # Cap elite picks to 2 per player — prevents one star
-                    # flooding the card with 3 near-identical combo props
-                    elite_picks = elite_picks[:2]
+                    # Cap elite picks to 4 per player — prevents one star
+                    # flooding the card with too many near-identical combo props
+                    elite_picks = elite_picks[:4]
 
                     player_data[player] = {
                         "dot":         dot,
@@ -14285,7 +14285,7 @@ def _build_cross_game_parlay(pool):
         pos = _get_pos_cgp(leg)
         rf  = _role_fit_score(bt, pos)
 
-        if role_filter == "primary" and rf < 1.0:
+        if role_filter == "primary" and rf <= 0.0:
             return -1.0
         if role_filter == "primary+secondary" and rf == 0.0:
             return -1.0
@@ -15899,7 +15899,7 @@ def send_sgp_for_game(game_name, game_legs):
         bt  = (leg.get("bet_type") or "").lower()
         pos = _get_pos(leg)
         rf  = _role_fit_score(bt, pos)
-        if role_filter == "primary" and rf < 1.0:
+        if role_filter == "primary" and rf <= 0.0:
             return -1.0
         if role_filter == "primary+secondary" and rf == 0.0:
             return -1.0
