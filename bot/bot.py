@@ -9735,18 +9735,16 @@ def send_results_recap():
     value_hit  = min(wins,   key=lambda b: b.get("confidence", 0), default=None)
 
     def _pick_label(b):
-        """Short readable label for a single bet."""
+        """Short readable label for a single bet — FanDuel format only, no model data."""
         player   = b.get("player", "") or ""
         pick     = b.get("pick", "")
         bet_type = b.get("betType", "")
         game     = b.get("game", "") or ""
-        conf     = b.get("confidence", 0)
-        conf_str = f" ({conf}%)" if conf else ""
         if player and player != game:
-            return f"{player} — {pick}{conf_str}"
+            return f"{player} — {pick}"
         if bet_type in ("OVER", "UNDER") and game:
-            return f"{pick} ({game}){conf_str}"
-        return f"{pick}{conf_str}"
+            return f"{pick} ({game})"
+        return pick
 
     highlights = ""
     if top_play:
@@ -12106,12 +12104,7 @@ def run_full_system():
 
             def player_line(p, d):
                 pos = f" · {d['position']}" if d["position"] else ""
-                pr  = d["pred"]
-                return (
-                    f"{d['dot']} *{p}*{pos}\n"
-                    f"🏀 {pr['points']} pts · 💪 {pr['rebounds']} reb · "
-                    f"🔥 {pr['assists']} ast · 🎯 {pr['threes']} 3s"
-                )
+                return f"{d['dot']} *{p}*{pos}"
 
             sections = []
             if buckets["away"]:
@@ -12186,15 +12179,9 @@ def run_full_system():
 
 
 def auto_run():
+    """Legacy loop — superseded by main(). Kept as fallback; does not send model internals."""
     while True:
-        picks = run_full_system()
-
-        for p in picks:
-            send_telegram(
-                f"{p['player']} {p['pick']} {p['line']} | "
-                f"{p['confidence']}% | Bet ${p['bet_size']}"
-            )
-
+        run_full_system()
         time.sleep(180)
 
 
@@ -13350,40 +13337,6 @@ def run():
     # Props are precision-timed: the main loop calls _fire_prop_wave() once per day
     # at exactly 2 hours before the earliest tip-off, pulling a fresh FanDuel batch.
     # Skipping the old _games_in_window gate to avoid early/empty fetches.
-    save_status(picks_count)
-    return picks_count
-    player_picks = run_full_system()  # kept for direct calls only (unreachable via run())
-    from decision_engine import implied_probability as _ip_prop
-    for pk in player_picks:
-        confidence  = pk.get("confidence", 0)
-        prop_type   = pk.get("prop_type", "props")
-        _pk_game    = pk.get("game", pk.get("player", ""))  # "game" always present since fix
-        _pk_gdata   = _games_data.get(_pk_game, {})
-        _prop_tier, _ = assign_tier(confidence)
-        # ── Real probability + edge for props ─────────────────────────────────
-        _pk_odds    = pk.get("odds", -115)
-        _pk_line    = pk.get("line") or 0
-        _pk_pred    = pk.get("prediction") or _pk_line
-        _pk_std     = _PROP_STD.get(prop_type, 5.0)
-        _pk_sf      = _norm_sf(_pk_line, _pk_pred, _pk_std)
-        _pk_prob    = round(_pk_sf if pk.get("pick", "OVER").upper() == "OVER" else 1.0 - _pk_sf, 4)
-        _pk_implied = _ip_prop(_pk_odds)
-        _pk_edge    = round(_pk_prob - _pk_implied, 4)
-        # ── Already saved to DB by run_full_system() — only track for parlay builder ──
-        picks_count += 1
-        _todays_parlay_legs.append({
-            "desc":        f"{pk.get('player')} {pk.get('pick','OVER')} {_pk_line} {pk.get('prop_type','pts')}",
-            "game":        _pk_game,
-            "bet_type":    pk.get("prop_type", "PROP"),
-            "edge":        _pk_edge,
-            "confidence":  confidence,
-            "correlation": pk.get("pick", "OVER").upper(),
-            "team":        pk.get("team"),
-            "team_role":   pk.get("role", "unknown"),
-            "is_starter":  pk.get("is_starter", True),
-            "avg_mins":    pk.get("avg_mins", 30),
-        })
-
     save_status(picks_count)
     return picks_count
 
