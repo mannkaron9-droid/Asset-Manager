@@ -4293,14 +4293,17 @@ def _watch_all_live_games():
                     except Exception:
                         pass
 
-                    # ── Opponent defensive rating (pts allowed last 10 games) ─
+                    # ── Opponent defensive rating (avg pts allowed per player) ─
+                    # Query players who faced the opponent — lower avg = tighter D
                     _opp_def = 0.0
                     try:
                         _dc = conn.cursor()
                         _dc.execute("""
-                            SELECT AVG(pts) FROM player_observations
-                            WHERE team = %s AND game_date < %s
-                            ORDER BY game_date DESC LIMIT 100
+                            SELECT AVG(pts) FROM (
+                                SELECT pts FROM player_observations
+                                WHERE opponent = %s AND game_date < %s
+                                ORDER BY game_date DESC LIMIT 150
+                            ) sub
                         """, (opponent, today))
                         _dr = _dc.fetchone()
                         _dc.close()
@@ -4555,14 +4558,19 @@ def _refresh_matchup_data(season: str = "2024-25") -> None:
 
     rows_written = 0
     try:
-        # Find the SeasonMatchups resultSet
+        # Find the matchup resultSet — name varies by API version
+        result_sets = data.get("resultSets", [])
         rs = next(
-            (x for x in data.get("resultSets", [])
-             if x.get("name") == "SeasonMatchups"),
+            (x for x in result_sets
+             if x.get("name") in ("SeasonMatchups", "MatchupsRollup", "Matchups")),
             None
         )
+        if not rs and result_sets:
+            # Fallback: take the first resultSet with row data
+            rs = next((x for x in result_sets if x.get("rowSet")), None)
         if not rs:
-            print("[Matchup] resultSet 'SeasonMatchups' not found")
+            names = [x.get("name") for x in result_sets]
+            print(f"[Matchup] No usable resultSet found. Available: {names}")
             return
 
         headers  = rs["headers"]
