@@ -11953,12 +11953,32 @@ def run_full_system():
             # Build per-player data
             _game_picks_start = len(all_picks)   # track new picks for this game
             player_data = {}
+            # ── Build team keyword set for this game once ──────────────────
+            _game_team_words = {
+                w for w in (away_team + " " + home_team).lower().split()
+                if len(w) > 3
+            }
+
             for player, pprops in list(players_dict.items())[:8]:
                 try:
                     time.sleep(2)
                     stats = get_player_stats(player)
                     if not stats:
                         continue
+
+                    # ── Team gate: reject players from the wrong game ─────
+                    # The Odds API sometimes tags a player under the wrong
+                    # game event.  BDL stats always have the correct team.
+                    _bdl_team = (stats.get("team") or "").lower().strip()
+                    if _bdl_team:
+                        _team_match = any(
+                            w in _game_team_words
+                            for w in _bdl_team.split() if len(w) > 3
+                        )
+                        if not _team_match:
+                            print(f"  [TeamGate] {player} plays for '{stats.get('team')}' "
+                                  f"— not '{away_team}' or '{home_team}', skipping")
+                            continue
 
                     # ── Load learned thresholds once per player ──────────
                     _thr       = load_learning_data().get("script_thresholds") or _SCRIPT_THRESHOLD_DEFAULTS
