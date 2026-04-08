@@ -9927,15 +9927,19 @@ def update_results():
     # stat ("points"/"rebounds"/etc.) — _resolve_stat() parses the stat from pick text.
     _PLAYER_PROP_TYPES = {"elite_prop", "individual", "prop", "neutral_prop",
                           "fade_prop", "benefactor_prop"}
+    # SGP and CROSS_GAME_PARLAY are intentionally excluded here —
+    # the live monitor grades them in real-time and _cleanup_parlay_grades()
+    # owns end-of-day resolution. Including them here risks partial BDL
+    # grading that corrupts the bust-propagation logic.
     unsettled_props = [
         b for b in bets
         if not b.get("result")
         and b.get("player")   # must have a player name to settle
+        and b.get("pick_category") not in ("SGP", "CROSS_GAME_PARLAY", "CROSS_SGP")
         and (
             b.get("betType", "").lower() in PROP_TYPES
             or b.get("betType", "").lower() in _PLAYER_PROP_TYPES
             or b.get("pick_category", "").lower() in _PLAYER_PROP_TYPES
-            or b.get("pick_category") in ("SGP", "CROSS_GAME_PARLAY")
         )
     ]
     if unsettled_props:
