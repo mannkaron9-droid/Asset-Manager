@@ -13992,7 +13992,7 @@ def send_avoid_list():
 
     # Flag questionable / doubtful players from tonight's games
     game_teams = set()
-    for g in upcoming:
+    for g in games:
         game_teams.add((g.get("home_team") or "").lower())
         game_teams.add((g.get("away_team") or "").lower())
 
