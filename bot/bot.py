@@ -260,6 +260,13 @@ def _db_init():
         cur.execute("ALTER TABLE shadow_picks ADD COLUMN IF NOT EXISTS implied_prob FLOAT DEFAULT NULL")
         cur.execute("ALTER TABLE shadow_picks ADD COLUMN IF NOT EXISTS parlay_id   TEXT DEFAULT NULL")
 
+        # ── Shot distribution columns — populated from CDN play-by-play ──────
+        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS fg3a    INTEGER DEFAULT 0")
+        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS rim_a   INTEGER DEFAULT 0")
+        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS rim_m   INTEGER DEFAULT 0")
+        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS mid_a   INTEGER DEFAULT 0")
+        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS mid_m   INTEGER DEFAULT 0")
+
         # ── Causality event log (survives restart/error — feeds self-learning) ─
         cur.execute("""
             CREATE TABLE IF NOT EXISTS causality_log (
@@ -4000,13 +4007,18 @@ def _watch_all_live_games():
             # ── ContextTracker: live script re-evaluation + causality ─────────
             if is_live:
                 try:
+                    _live_injuries = {}
+                    try:
+                        _live_injuries = get_espn_injuries() or {}
+                    except Exception:
+                        pass
                     from decision_engine import get_context_tracker
                     _pre_script = _get_predicted_script(home_team, away_team)
                     _ct = get_context_tracker(game_id, home_team, away_team)
                     _ct_evts = _ct.update(
                         period, time_str, home_pts, away_pts,
-                        player_stats=None,
-                        injuries=None,
+                        player_stats=_cdn_game_player_stats.get(game_id) or None,
+                        injuries=_live_injuries or None,
                     )
                     for _ct_evt in (_ct_evts or []):
                         print(f"  [ContextTracker] {_ct_evt['type'].upper()} — "
@@ -4235,6 +4247,12 @@ _shot_alerts_sent   = {}   # {player_name: last_alert_epoch}
 _shot_history       = {}   # {player_name: list of {"type","made","t"} dicts}
 _pbp_last_action    = {}   # {nba_game_id: last action_number seen}
 
+# Per-game player stat accumulators — built from CDN play-by-play actions
+# {game_id: {player_name: {pts, fg3a, fg3m, rim_a, rim_m, mid_a, mid_m}}}
+_cdn_game_player_stats: dict = {}
+# Tracks last known game status to detect live→final transitions
+_cdn_game_status: dict = {}    # {game_id: "live" | "final"}
+
 
 def _cdn_scoreboard():
     """Fetch today's games from NBA CDN (free, no key required)."""
@@ -4318,24 +4336,78 @@ def _process_cdn_shot(player_name, shot_type, made, game_label):
     return alert
 
 
+def _cdn_persist_shot_distribution(game_id, game_label):
+    """
+    Write accumulated CDN shot distribution for all players in a game to
+    player_observations (fg3a, fg3m, rim_a, rim_m, mid_a, mid_m columns).
+    Called once when a game transitions from live → final.
+    """
+    player_map = _cdn_game_player_stats.get(game_id, {})
+    if not player_map:
+        return
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    conn  = _db_conn()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        for pname, s in player_map.items():
+            try:
+                cur.execute("""
+                    UPDATE player_observations
+                    SET fg3a  = %s, fg3m = %s,
+                        rim_a = %s, rim_m = %s,
+                        mid_a = %s, mid_m = %s,
+                        observed_at = NOW()
+                    WHERE player_name = %s
+                      AND game_date   = %s
+                """, (s["fg3a"], s["fg3m"],
+                      s["rim_a"], s["rim_m"],
+                      s["mid_a"], s["mid_m"],
+                      pname, today))
+            except Exception as _pe:
+                print(f"[CDN] shot persist error {pname}: {_pe}")
+        conn.commit()
+        cur.close()
+        print(f"[CDN] Shot distribution written for {len(player_map)} players — {game_label}")
+    except Exception as e:
+        print(f"[CDN] persist error {game_id}: {e}")
+    finally:
+        conn.close()
+
+
 def _cdn_live_tracker():
     """
-    Poll NBA CDN play-by-play for all live games.
-    Batches all hot/cold alerts per game into ONE message instead of one per player.
+    Poll NBA CDN play-by-play for all live and recently-finished games.
+    - Accumulates per-player shot stats (pts/fg3a/fg3m/rim/mid) every cycle
+    - Feeds those live stats into _cdn_game_player_stats so ContextTracker gets real data
+    - Sends hot/cold alerts to admin DM (batched per game)
+    - Persists shot distribution to player_observations on game-final transition
     """
     games = _cdn_scoreboard()
-    live  = [g for g in games if g.get("gameStatus") == 2]   # 2 = in-progress
-    if not live:
+    if not games:
         return
 
-    for g in live:
-        game_id    = g.get("gameId", "")
-        home       = g.get("homeTeam", {}).get("teamName", "")
-        away       = g.get("awayTeam", {}).get("teamName", "")
+    for g in games:
+        status  = g.get("gameStatus")   # 1=pre, 2=live, 3=final
+        game_id = g.get("gameId", "")
+        home    = g.get("homeTeam", {}).get("teamName", "")
+        away    = g.get("awayTeam", {}).get("teamName", "")
         game_label = f"{away} @ {home}"
         if not game_id:
             continue
 
+        # ── Detect live→final transition → persist shot distribution ─────────
+        prev_status = _cdn_game_status.get(game_id)
+        _cdn_game_status[game_id] = status
+        if prev_status == 2 and status == 3:
+            _cdn_persist_shot_distribution(game_id, game_label)
+            continue   # No more play-by-play to process for a final game
+
+        if status != 2:   # Only process live games below
+            continue
+
+        # ── Pull new play-by-play actions ─────────────────────────────────────
         actions   = _cdn_pbp(game_id)
         last_seen = _pbp_last_action.get(game_id, 0)
         new_acts  = [a for a in actions if (a.get("actionNumber") or 0) > last_seen]
@@ -4343,7 +4415,10 @@ def _cdn_live_tracker():
             continue
         _pbp_last_action[game_id] = max(a.get("actionNumber", 0) for a in new_acts)
 
-        # Collect all alerts for this game — send as one batched message
+        # ── Accumulate per-player stats + collect hot/cold alerts ─────────────
+        if game_id not in _cdn_game_player_stats:
+            _cdn_game_player_stats[game_id] = {}
+
         game_alerts = []
         for action in new_acts:
             player = action.get("playerNameI", "").strip()
@@ -4352,6 +4427,29 @@ def _cdn_live_tracker():
             shot_type, made = _classify_shot_action(action)
             if shot_type is None:
                 continue
+
+            # Accumulate into per-game per-player dict
+            ps = _cdn_game_player_stats[game_id].setdefault(player, {
+                "pts": 0, "fg3a": 0, "fg3m": 0,
+                "rim_a": 0, "rim_m": 0, "mid_a": 0, "mid_m": 0
+            })
+            if shot_type == "3PT":
+                ps["fg3a"] += 1
+                if made:
+                    ps["fg3m"] += 1
+                    ps["pts"]  += 3
+            elif shot_type == "LAYUP":
+                ps["rim_a"] += 1
+                if made:
+                    ps["rim_m"] += 1
+                    ps["pts"]   += 2
+            else:   # MID
+                ps["mid_a"] += 1
+                if made:
+                    ps["mid_m"] += 1
+                    ps["pts"]   += 2
+
+            # Hot/cold alert logic (type-specific streaks)
             alert = _process_cdn_shot(player, shot_type, made, game_label)
             if alert:
                 game_alerts.append(alert)
