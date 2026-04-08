@@ -299,6 +299,24 @@ def _db_init():
             )
         """)
 
+        # ── Player-vs-player defensive matchup data ───────────────────────────
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS player_matchups (
+                off_player      VARCHAR(120) NOT NULL,
+                def_player      VARCHAR(120) NOT NULL,
+                def_team        VARCHAR(60)  NOT NULL,
+                season          VARCHAR(10)  NOT NULL,
+                partial_poss    FLOAT        DEFAULT 0,
+                matchup_fg_pct  FLOAT        DEFAULT 0,
+                matchup_fg3_pct FLOAT        DEFAULT 0,
+                pts_per_poss    FLOAT        DEFAULT 0,
+                updated_at      TIMESTAMPTZ  DEFAULT NOW(),
+                PRIMARY KEY (off_player, def_player, season)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS pm_off_idx ON player_matchups(off_player, season)")
+        cur.execute("CREATE INDEX IF NOT EXISTS pm_def_team_idx ON player_matchups(def_team, season)")
+
         # ── Causality event log (survives restart/error — feeds self-learning) ─
         cur.execute("""
             CREATE TABLE IF NOT EXISTS causality_log (
@@ -4493,6 +4511,125 @@ def _cdn_persist_shot_distribution(game_id, game_label):
         print(f"[CDN] persist error {game_id}: {e}")
     finally:
         conn.close()
+
+
+_last_matchup_refresh_date: str = ""   # guards once-per-day pull
+
+_NBA_STATS_HDRS = {
+    "Host":               "stats.nba.com",
+    "User-Agent":         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept":             "application/json, text/plain, */*",
+    "Referer":            "https://www.nba.com/",
+    "Origin":             "https://www.nba.com",
+    "x-nba-stats-origin": "stats",
+    "x-nba-stats-token":  "true",
+    "Connection":         "keep-alive",
+}
+
+def _refresh_matchup_data(season: str = "2024-25") -> None:
+    """
+    Pull the full season player-vs-player defensive matchup table from
+    stats.nba.com (leagueseasonmatchups endpoint) and upsert into
+    player_matchups.  Only rows with >= 3 partial possessions are kept
+    to filter out noise.  Called once per calendar day before picks go out.
+    """
+    global _last_matchup_refresh_date
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    if _last_matchup_refresh_date == today:
+        return
+
+    print(f"[Matchup] Refreshing season matchup data ({season}) …")
+    url = (
+        f"https://stats.nba.com/stats/leagueseasonmatchups"
+        f"?LeagueID=00&PerMode=Totals&Season={season}"
+        f"&SeasonType=Regular+Season"
+    )
+    try:
+        import urllib.request as _ur
+        req = _ur.Request(url, headers=_NBA_STATS_HDRS)
+        with _ur.urlopen(req, timeout=20) as r:
+            data = json.loads(r.read())
+    except Exception as e:
+        print(f"[Matchup] Fetch error: {e}")
+        return
+
+    rows_written = 0
+    try:
+        # Find the SeasonMatchups resultSet
+        rs = next(
+            (x for x in data.get("resultSets", [])
+             if x.get("name") == "SeasonMatchups"),
+            None
+        )
+        if not rs:
+            print("[Matchup] resultSet 'SeasonMatchups' not found")
+            return
+
+        headers  = rs["headers"]
+        row_set  = rs["rowSet"]
+
+        # Column index helpers
+        def _ci(name):
+            return headers.index(name) if name in headers else -1
+
+        i_off  = _ci("OFF_PLAYER_NAME")
+        i_def  = _ci("DEF_PLAYER_NAME")
+        i_dteam= _ci("DEF_TEAM_ABBREVIATION")
+        i_poss = _ci("PARTIAL_POSS")
+        i_fgpct= _ci("MATCHUP_FG_PCT")
+        i_fg3p = _ci("MATCHUP_FG3_PCT")
+        i_pts  = _ci("PLAYER_PTS")
+
+        if any(x == -1 for x in [i_off, i_def, i_dteam, i_poss]):
+            print(f"[Matchup] Missing expected columns. Headers: {headers[:10]}")
+            return
+
+        conn = _db_conn()
+        if not conn:
+            return
+        cur = conn.cursor()
+
+        for row in row_set:
+            off   = (row[i_off]   or "").strip()
+            defd  = (row[i_def]   or "").strip()
+            dteam = (row[i_dteam] or "").strip()
+            poss  = float(row[i_poss]  or 0)
+            fgpct = float(row[i_fgpct] or 0) if i_fgpct >= 0 else 0.0
+            fg3p  = float(row[i_fg3p]  or 0) if i_fg3p  >= 0 else 0.0
+            pts   = float(row[i_pts]   or 0) if i_pts   >= 0 else 0.0
+
+            if poss < 3 or not off or not defd:
+                continue
+
+            pts_per_poss = round(pts / poss, 4) if poss > 0 else 0.0
+
+            try:
+                cur.execute("""
+                    INSERT INTO player_matchups
+                        (off_player, def_player, def_team, season,
+                         partial_poss, matchup_fg_pct, matchup_fg3_pct,
+                         pts_per_poss, updated_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                    ON CONFLICT (off_player, def_player, season) DO UPDATE SET
+                        def_team        = EXCLUDED.def_team,
+                        partial_poss    = EXCLUDED.partial_poss,
+                        matchup_fg_pct  = EXCLUDED.matchup_fg_pct,
+                        matchup_fg3_pct = EXCLUDED.matchup_fg3_pct,
+                        pts_per_poss    = EXCLUDED.pts_per_poss,
+                        updated_at      = NOW()
+                """, (off, defd, dteam, season, poss, fgpct, fg3p, pts_per_poss))
+                rows_written += 1
+            except Exception as _ue:
+                print(f"[Matchup] upsert err {off}/{defd}: {_ue}")
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        _last_matchup_refresh_date = today
+        print(f"[Matchup] Done — {rows_written:,} matchup pairs upserted")
+
+    except Exception as e:
+        print(f"[Matchup] Parse/write error: {e}")
 
 
 def _cdn_live_tracker():
@@ -12755,6 +12892,11 @@ def run():
                 print(f"[Odds] Seed fetch — {_mins_to_first:.0f}min to first tip (game lines only)")
                 get_odds_cached(force=True)
                 _odds_game_fetch_date["early"] = _today_et
+                # Pull season defensive matchup data once per day alongside seed
+                try:
+                    _refresh_matchup_data()
+                except Exception as _mue:
+                    print(f"[Matchup] daily refresh error: {_mue}")
 
             # ── Cluster fetches: 30 min before each tip cluster — game lines only ─
             # Props are already fresh from _fire_prop_wave(); no re-pull needed here.
