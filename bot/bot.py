@@ -6807,11 +6807,21 @@ def get_espn_injuries():
     Return {lower-case player name: {status, comment, team}} from ESPN.
     Falls back to BDL inactive-player list if ESPN errors out.
     All existing callers stay unchanged — fallback is transparent.
+    DB-backed: restarts load from DB so no live call is needed until TTL expires.
     """
     global _injury_cache, _injury_cache_ts
     now = time.time()
     if now - _injury_cache_ts < _INJURY_TTL and _injury_cache:
         return _injury_cache
+
+    # ── DB cache check before hitting ESPN ─────────────────────────────────
+    _db_inj = _db_load_cache("espn_injuries_cache")
+    if _db_inj and now - float(_db_inj.get("ts", 0)) < _INJURY_TTL:
+        _injury_cache    = _db_inj.get("injuries", {})
+        _injury_cache_ts = float(_db_inj.get("ts", now))
+        print(f"[Injuries] Loaded {len(_injury_cache)} entries from DB cache")
+        return _injury_cache
+
     result = {}
     espn_ok = False
     try:
@@ -6854,6 +6864,7 @@ def get_espn_injuries():
     if result:
         _injury_cache    = result
         _injury_cache_ts = now
+        _db_upsert_cache("espn_injuries_cache", {"ts": now, "injuries": result})
     return result
 
 
@@ -7198,14 +7209,29 @@ def _get_player_stats_espn(player_name):
         return None
 
 
+_PLAYER_STATS_DB_TTL = 21600  # 6 hours — season stats don't change intra-day
+
+
 def get_player_stats(player_name):
     import time as _time_mod
     _cache_key = player_name.strip().lower()
+    _db_key    = f"player_stats:{_cache_key}"
+
+    # ── 1. Memory cache (90-min TTL) ────────────────────────────────────────
     _cached = _player_stats_cache.get(_cache_key)
     if _cached:
         _stats, _fetched = _cached
         if _time_mod.time() - _fetched < _PLAYER_STATS_TTL:
             return _stats
+
+    # ── 2. DB cache (6-hour TTL, survives restarts) ──────────────────────────
+    _db_entry = _db_load_cache(_db_key)
+    if _db_entry and _time_mod.time() - float(_db_entry.get("ts", 0)) < _PLAYER_STATS_DB_TTL:
+        _result = _db_entry.get("stats", {})
+        if _result:
+            _player_stats_cache[_cache_key] = (_result, _time_mod.time())
+            print(f"[PlayerStats] {player_name} — loaded from DB cache")
+            return _result
 
     if not BDL_API_KEY:
         print("BDL_API_KEY not set — trying ESPN fallback")
@@ -7335,6 +7361,11 @@ def get_player_stats(player_name):
     }
     import time as _time_mod2
     _player_stats_cache[_cache_key] = (_result, _time_mod2.time())
+    # Save to DB so the next restart doesn't need to re-fetch this player from BDL
+    try:
+        _db_upsert_cache(_db_key, {"ts": _time_mod2.time(), "stats": _result})
+    except Exception:
+        pass
     return _result
 
 
@@ -7409,10 +7440,19 @@ def detect_back_to_back_teams():
     Check ESPN scoreboard for yesterday's games.
     Returns a set of team name keywords (lowercase) that played yesterday.
     Players on these teams get a confidence penalty.
+    DB-backed: restarts load from DB so no ESPN call needed until TTL expires.
     """
     global _b2b_cache, _b2b_cache_ts
     now = time.time()
     if now - _b2b_cache_ts < _B2B_TTL and _b2b_cache:
+        return _b2b_cache
+
+    # ── DB cache check before hitting ESPN ─────────────────────────────────
+    _db_b2b = _db_load_cache("b2b_teams_cache")
+    if _db_b2b and now - float(_db_b2b.get("ts", 0)) < _B2B_TTL:
+        _b2b_cache    = set(_db_b2b.get("teams", []))
+        _b2b_cache_ts = float(_db_b2b.get("ts", now))
+        print(f"[B2B] Loaded from DB cache: {_b2b_cache}")
         return _b2b_cache
 
     yesterday = (datetime.now().date() - timedelta(days=1)).strftime("%Y%m%d")
@@ -7427,6 +7467,7 @@ def detect_back_to_back_teams():
                         b2b_teams.add(name.split()[-1].lower())
         _b2b_cache    = b2b_teams
         _b2b_cache_ts = now
+        _db_upsert_cache("b2b_teams_cache", {"ts": now, "teams": list(b2b_teams)})
         if b2b_teams:
             print(f"[B2B] Teams on back-to-back: {b2b_teams}")
         return b2b_teams
@@ -7526,6 +7567,11 @@ def _normalize_cdn_game(g):
     }
 
 
+_todays_games_mem_cache: list = []
+_todays_games_mem_ts: float  = 0.0
+_TODAYS_GAMES_TTL = 1800  # 30 min — fresh enough for live status, saves BDL calls
+
+
 def get_todays_games(date=None):
     """
     Unified game fetcher — BDL → ESPN → NBA CDN.
@@ -7533,15 +7579,39 @@ def get_todays_games(date=None):
     Automatically falls back to the next source if the primary returns empty.
     Always returns the richest available data, never an empty list if any
     source has games.
+    DB-backed: restarts load from DB so no BDL call needed until TTL expires.
     """
+    import time as _tg_time
+    global _todays_games_mem_cache, _todays_games_mem_ts
+
     if not date:
         date = datetime.now().date()
+
+    date_str = str(date)
+
+    # ── Memory cache (30-min TTL) ─────────────────────────────────────
+    if _todays_games_mem_cache and _tg_time.time() - _todays_games_mem_ts < _TODAYS_GAMES_TTL:
+        print(f"[Games] Memory cache hit — {len(_todays_games_mem_cache)} games")
+        return _todays_games_mem_cache
+
+    # ── DB cache (30-min TTL, survives restarts) ──────────────────────
+    _db_games = _db_load_cache("todays_games_cache")
+    if (_db_games and _db_games.get("date") == date_str
+            and _tg_time.time() - float(_db_games.get("ts", 0)) < _TODAYS_GAMES_TTL):
+        _todays_games_mem_cache = _db_games.get("games", [])
+        _todays_games_mem_ts    = float(_db_games.get("ts", _tg_time.time()))
+        print(f"[Games] DB cache hit — {len(_todays_games_mem_cache)} games "
+              f"(age {int((_tg_time.time() - _todays_games_mem_ts) / 60)}m)")
+        return _todays_games_mem_cache
 
     # ── Source 1: BDL ────────────────────────────────────────────────
     try:
         bdl_raw = _bdl_get(f"{BDL_BASE}/games?dates[]={date}").get("data", [])
         if bdl_raw:
             games = [_normalize_bdl_game(g) for g in bdl_raw]
+            _todays_games_mem_cache = games
+            _todays_games_mem_ts    = _tg_time.time()
+            _db_upsert_cache("todays_games_cache", {"date": date_str, "ts": _tg_time.time(), "games": games})
             print(f"[DataLayer] get_todays_games: {len(games)} games from BDL")
             return games
     except Exception as _e:
@@ -7552,6 +7622,9 @@ def get_todays_games(date=None):
         espn_raw = _fetch_bdl_live_games()   # already uses ESPN scoreboard
         if espn_raw:
             games = [_normalize_espn_game(g) for g in espn_raw]
+            _todays_games_mem_cache = games
+            _todays_games_mem_ts    = _tg_time.time()
+            _db_upsert_cache("todays_games_cache", {"date": date_str, "ts": _tg_time.time(), "games": games})
             print(f"[DataLayer] get_todays_games: {len(games)} games from ESPN")
             return games
     except Exception as _e:
@@ -7562,6 +7635,9 @@ def get_todays_games(date=None):
         cdn_raw = _cdn_scoreboard()
         if cdn_raw:
             games = [_normalize_cdn_game(g) for g in cdn_raw]
+            _todays_games_mem_cache = games
+            _todays_games_mem_ts    = _tg_time.time()
+            _db_upsert_cache("todays_games_cache", {"date": date_str, "ts": _tg_time.time(), "games": games})
             print(f"[DataLayer] get_todays_games: {len(games)} games from NBA CDN")
             return games
     except Exception as _e:
@@ -7956,12 +8032,27 @@ def _refresh_schedule_cache() -> None:
         _schedule_cache["window_end"]   = et_now.replace(hour=23, minute=59, second=0, microsecond=0)
         print(f"[Schedule] {len(games)} game(s) today but tip times not parsed — broad window 11 AM–midnight ET")
 
+    # ── Persist to DB so restarts don't need to re-parse schedule ──────────
+    try:
+        ws = _schedule_cache.get("window_start")
+        we = _schedule_cache.get("window_end")
+        _db_upsert_cache("schedule_cache", {
+            "date":          today_str,
+            "has_games":     _schedule_cache["has_games"],
+            "window_start":  ws.isoformat() if ws else None,
+            "window_end":    we.isoformat() if we else None,
+        })
+        print("[Schedule] Saved to DB cache")
+    except Exception as _sce:
+        print(f"[Schedule] DB save error: {_sce}")
+
 
 def _in_game_window() -> bool:
     """
     Returns True if the Odds API should be called right now.
     Uses the exact tip-time schedule fetched once per day (free APIs only).
     Re-fetches only when the ET date rolls over to a new day.
+    DB-backed: restarts load the window from DB before calling any API.
     """
     import zoneinfo as _zi
 
@@ -7974,7 +8065,24 @@ def _in_game_window() -> bool:
 
     # Rebuild cache if it's a new day (or first run)
     if _schedule_cache["date"] != today_str:
-        _refresh_schedule_cache()
+        # ── Try DB first before hitting BDL/ESPN ────────────────────────────
+        _db_sched = _db_load_cache("schedule_cache")
+        if _db_sched and _db_sched.get("date") == today_str:
+            try:
+                import zoneinfo as _zi2
+                _tz = _zi2.ZoneInfo("America/New_York")
+                ws_iso = _db_sched.get("window_start")
+                we_iso = _db_sched.get("window_end")
+                _schedule_cache["date"]         = today_str
+                _schedule_cache["has_games"]    = bool(_db_sched.get("has_games", False))
+                _schedule_cache["window_start"] = datetime.fromisoformat(ws_iso).replace(tzinfo=_tz) if ws_iso else None
+                _schedule_cache["window_end"]   = datetime.fromisoformat(we_iso).replace(tzinfo=_tz) if we_iso else None
+                print(f"[Schedule] Loaded from DB cache for {today_str}")
+            except Exception as _sle:
+                print(f"[Schedule] DB load failed ({_sle}) — falling back to API fetch")
+                _refresh_schedule_cache()
+        else:
+            _refresh_schedule_cache()
 
     if not _schedule_cache["has_games"]:
         return False
