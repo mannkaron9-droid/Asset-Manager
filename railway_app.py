@@ -431,7 +431,7 @@ def debug_bets():
             info["db_count"]      = cnt or 0
             info["db_ok"]         = True
             info["latest_db_bet"] = str(latest) if latest else None
-            cur.execute("SELECT key, value FROM bot_status WHERE key IN ('lastRun','picksToday','last_save_error')")
+            cur.execute("SELECT key, value FROM bot_status WHERE key IN ('lastRun','picksToday','last_save_error','last_crash')")
             for k, v in cur.fetchall():
                 info[f"status_{k}"] = v
             # ── Odds API quota from learning_data ──────────────────────────
@@ -850,10 +850,24 @@ def _start_bot():
             print("[railway] Bot SystemExit — stopping thread", flush=True)
             break
         except Exception as e:
+            tb_str = traceback.format_exc()
             print(f"[railway] Bot crashed: {e}", flush=True)
-            traceback.print_exc()
-            print("[railway] Restarting bot in 30s...", flush=True)
-            time.sleep(30)
+            print(tb_str, flush=True)
+            # Persist crash info to DB so /api/debug/bets exposes it
+            try:
+                _ec = _db_conn()
+                if _ec:
+                    _ecur = _ec.cursor()
+                    _ecur.execute(
+                        "INSERT INTO bot_status (key, value) VALUES ('last_crash', %s) "
+                        "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
+                        (f"{type(e).__name__}: {e}\n{tb_str}"[:1000],)
+                    )
+                    _ec.commit(); _ecur.close(); _ec.close()
+            except Exception as _dbe:
+                print(f"[railway] Could not save crash to DB: {_dbe}", flush=True)
+            print("[railway] Restarting bot in 90s...", flush=True)
+            time.sleep(90)
 
 
 bot_thread = threading.Thread(target=_start_bot, daemon=True, name="BettingBot")
