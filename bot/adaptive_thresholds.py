@@ -84,7 +84,7 @@ _PRESETS = {
         "PUBLIC_FADE_PCT":   77,   # COLD: only the most extreme public spots qualify
         "MAX_FADES":          1,
         "MAX_JUICE_LEGS":     2,
-        "min_confidence":   72.0,  # L9 floor: cold streak — only cleanest edges pass
+        "min_confidence":   62.0,  # L9 floor: tighten other filters, but keep picks flowing
     },
 }
 
