@@ -515,18 +515,29 @@ def build_slip_from_props(
                         leg.confidence = round(leg.confidence - 2.0, 1)
                         adj_log.append("is_cold -2.0")
 
-                    # 6. Shot efficiency signal — from CDN play-by-play history
+                    # 6. Shot efficiency + extended signals from CDN play-by-play
                     try:
-                        from bot.decision_engine import get_shot_efficiency_signal as _gses
+                        from bot.decision_engine import (
+                            get_shot_efficiency_signal as _gses,
+                            get_rest_signal           as _grs,
+                            get_opp_defense_signal    as _gods,
+                            get_turnover_signal       as _gts,
+                            get_ft_rate_signal        as _gfts,
+                        )
                         from bot.bot import _db_conn as _dbc
                         _se_conn = _dbc()
                         if _se_conn:
-                            _se_mult = _gses(_se_conn, player, prop_type)
+                            _combined_mult = 1.0
+                            _combined_mult *= _gses (_se_conn, player, prop_type)
+                            _combined_mult *= _grs  (_se_conn, player)
+                            _combined_mult *= _gods (_se_conn, player, prop_type)
+                            _combined_mult *= _gts  (_se_conn, player, prop_type)
+                            _combined_mult *= _gfts (_se_conn, player, prop_type)
                             _se_conn.close()
-                            if _se_mult != 1.0:
-                                _se_adj = round((leg.confidence * _se_mult) - leg.confidence, 1)
-                                leg.confidence = round(leg.confidence * _se_mult, 1)
-                                adj_log.append(f"shot_eff {_se_adj:+.1f}")
+                            if _combined_mult != 1.0:
+                                _se_adj = round((leg.confidence * _combined_mult) - leg.confidence, 1)
+                                leg.confidence = round(leg.confidence * _combined_mult, 1)
+                                adj_log.append(f"signals {_se_adj:+.1f}")
                     except Exception:
                         pass
 
@@ -775,15 +786,27 @@ def get_top_candidates(
                         if hist_adj != 0.0:
                             base_conf = base_conf + hist_adj
 
-                        # ── Shot efficiency signal from CDN play-by-play ──────
+                        # ── Extended signals from CDN play-by-play ────────────
                         try:
-                            from bot.decision_engine import get_shot_efficiency_signal as _gses2
+                            from bot.decision_engine import (
+                                get_shot_efficiency_signal as _gses2,
+                                get_rest_signal           as _grs2,
+                                get_opp_defense_signal    as _gods2,
+                                get_turnover_signal       as _gts2,
+                                get_ft_rate_signal        as _gfts2,
+                            )
                             from bot.bot import _db_conn as _dbc2
                             _se2_conn = _dbc2()
                             if _se2_conn:
-                                _se2_mult = _gses2(_se2_conn, player, prop["prop_type"])
+                                _pt2 = prop["prop_type"]
+                                _m2  = 1.0
+                                _m2 *= _gses2(_se2_conn, player, _pt2)
+                                _m2 *= _grs2 (_se2_conn, player)
+                                _m2 *= _gods2(_se2_conn, player, _pt2)
+                                _m2 *= _gts2 (_se2_conn, player, _pt2)
+                                _m2 *= _gfts2(_se2_conn, player, _pt2)
                                 _se2_conn.close()
-                                base_conf = base_conf * _se2_mult
+                                base_conf = base_conf * _m2
                         except Exception:
                             pass
 
