@@ -8545,7 +8545,8 @@ def _try_parse(v):
 
 
 def save_status(picks_today, extra=None):
-    updates = {"lastRun": str(datetime.now()), "picksToday": str(picks_today)}
+    from datetime import timezone as _tz
+    updates = {"lastRun": datetime.now(_tz.utc).isoformat(), "picksToday": str(picks_today)}
     if extra:
         updates.update({k: _safe_json_dumps(v) if not isinstance(v, str) else v for k, v in extra.items()})
     conn = _db_conn()
