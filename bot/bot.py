@@ -11185,23 +11185,20 @@ def retrain_from_results():
     return ld
 
 
-def get_player_confidence_adjustment(player_name, prop_type=None):
+def get_player_confidence_adjustment(player_name, prop_type=None, role=None):
     """
-    Reads the player's historical prop win rate from learning_data and
-    returns a confidence adjustment (positive = boost, negative = penalty).
+    Reads the player's historical prop win rate from two sources and blends them:
 
-    Requires at least 5 settled picks before applying any adjustment.
+      1. learning_data.player_prop_history — overall / per-prop-type W/L
+      2. bets table — role-segmented win rates (player + prop_type + role)
+
+    Requires ≥5 settled picks per segment before applying any adjustment.
     Scale: ±2 per 5% deviation from 50% baseline, capped at ±10.
+    Role-specific signal is blended 60/40 over the overall signal when both
+    have enough data; otherwise whichever segment has enough data is used alone.
     """
     try:
-        ld      = load_learning_data()
-        history = ld.get("player_prop_history", {})
-        pkey    = player_name.lower().strip()
-        pdata   = history.get(pkey, {})
-        if not pdata:
-            return 0.0
-
-        # Use prop-type specific data if available, else overall
+        # ── Normalise prop-type key ───────────────────────────────────────
         bt = None
         if prop_type:
             bt = prop_type.lower()
@@ -11210,17 +11207,68 @@ def get_player_confidence_adjustment(player_name, prop_type=None):
             bt = "ast" if bt in ("assists", "player_assists") else bt
             bt = "fg3" if bt in ("threes", "fg3m", "fg3_made") else bt
 
-        record = pdata.get(bt) if bt and bt in pdata else pdata.get("overall", {})
-        n = record.get("n", 0)
-        w = record.get("w", 0)
-        if n < 5:
-            return 0.0  # not enough data yet
+        pkey = player_name.lower().strip()
 
-        hit_rate  = w / n
-        deviation = hit_rate - 0.50          # how far above/below 50%
-        adj       = round(deviation * 40, 1) # ±10 at 75%/25% extremes
-        adj       = max(-10.0, min(10.0, adj))
-        return adj
+        # ── 1. Overall / prop-type adjustment from learning_data ─────────
+        overall_adj = 0.0
+        try:
+            ld      = load_learning_data()
+            history = ld.get("player_prop_history", {})
+            pdata   = history.get(pkey, {})
+            record  = pdata.get(bt) if bt and bt in pdata else pdata.get("overall", {})
+            n = record.get("n", 0)
+            w = record.get("w", 0)
+            if n >= 5:
+                deviation   = (w / n) - 0.50
+                overall_adj = max(-10.0, min(10.0, round(deviation * 40, 1)))
+        except Exception:
+            pass
+
+        # ── 2. Role-segmented win rate from bets table ───────────────────
+        role_adj = 0.0
+        if role:
+            try:
+                # Map normalised bt key back to betType values stored in bets
+                _bt_map = {
+                    "pts": ["points", "player_points"],
+                    "reb": ["rebounds", "player_rebounds", "total_rebounds"],
+                    "ast": ["assists", "player_assists"],
+                    "fg3": ["threes", "fg3m", "fg3_made"],
+                }
+                bt_filters = _bt_map.get(bt, []) if bt else []
+
+                with _db_conn() as conn:
+                    cur = conn.cursor()
+                    if bt_filters:
+                        placeholders = ",".join(["%s"] * len(bt_filters))
+                        cur.execute(
+                            f"SELECT result FROM bets "
+                            f"WHERE LOWER(player) = %s AND role = %s "
+                            f"  AND betType IN ({placeholders}) AND result IS NOT NULL",
+                            [pkey, role] + bt_filters,
+                        )
+                    else:
+                        cur.execute(
+                            "SELECT result FROM bets "
+                            "WHERE LOWER(player) = %s AND role = %s AND result IS NOT NULL",
+                            [pkey, role],
+                        )
+                    rows = cur.fetchall()
+                    rn = len(rows)
+                    rw = sum(1 for r in rows if str(r[0]).upper() == "WIN")
+                    if rn >= 5:
+                        r_dev    = (rw / rn) - 0.50
+                        role_adj = max(-10.0, min(10.0, round(r_dev * 40, 1)))
+            except Exception:
+                pass
+
+        # ── Blend: role 60% + overall 40% when both have data ────────────
+        if role_adj != 0.0 and overall_adj != 0.0:
+            return round(role_adj * 0.6 + overall_adj * 0.4, 1)
+        if role_adj != 0.0:
+            return role_adj
+        return overall_adj
+
     except Exception:
         return 0.0
 
