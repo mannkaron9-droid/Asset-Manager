@@ -14014,6 +14014,8 @@ def send_avoid_list():
                 if player:
                     by_player.setdefault(player, []).append(p)
 
+            _BASIC_PROPS  = {"points", "rebounds", "assists", "threes"}
+            _avoid_seen   = set()   # dedup — one entry per player
             checked = 0
             for player, pprops in list(by_player.items())[:30]:
                 try:
@@ -14028,14 +14030,23 @@ def send_avoid_list():
                     team = stats.get("team", "")
                     for prop in pprops:
                         prop_type = prop.get("prop_type", "points")
+                        # Only flag basic props — combo props can't be predicted reliably
+                        if prop_type not in _BASIC_PROPS:
+                            continue
                         line = prop.get("line")
                         if not line:
                             continue
-                        pred_key = PRED_KEY.get(prop_type, "pred_pts")
+                        pred_key   = PRED_KEY.get(prop_type, "pred_pts")
                         prediction = float(stats.get(pred_key) or 0)
+                        # Skip when model has no data — don't report 0 as underestimate
+                        if prediction <= 0:
+                            continue
                         gap = float(line) - prediction   # positive = Vegas has player OVER model
                         # Flag when Vegas line is significantly higher than model
                         if gap >= AVOID_THRESHOLD:
+                            if player in _avoid_seen:
+                                continue   # one flag per player max
+                            _avoid_seen.add(player)
                             unit = UNIT.get(prop_type, prop_type)
                             avoid_players.append({
                                 "player":     player,
@@ -14085,8 +14096,9 @@ def send_avoid_list():
             "Questionable": "🟡", "Day-To-Day": "🟡",
         }
         for name, team, status in injury_flags[:8]:
-            icon = STATUS_ICON.get(status, "🟡")
-            lines.append(f"{icon} *{name}*  _({team})_ — {status}")
+            icon      = STATUS_ICON.get(status, "🟡")
+            team_disp = team.title() if team else "—"
+            lines.append(f"{icon} *{name}*  _({team_disp})_ — {status}")
 
     lines += [
         D,
