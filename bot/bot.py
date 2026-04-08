@@ -5467,7 +5467,7 @@ def _generate_shadow_picks(game_id, home_team, away_team, game_date):
                 bt  = (leg.get("bet_type") or "").lower()
                 pos = _normalize_pos(leg.get("position", ""))
                 rf  = _role_fit_score(bt, pos)
-                if role_filter == "primary" and rf < 1.0:
+                if role_filter == "primary" and rf <= 0.0:
                     return -1.0
                 if role_filter == "primary+secondary" and rf == 0.0:
                     return -1.0
@@ -5491,13 +5491,38 @@ def _generate_shadow_picks(game_id, home_team, away_team, game_date):
                     remaining.remove(best)
                 return selected
 
-            for tier, role_filter, size_range in [
-                ("sgp_safe",       "primary",           (2, 4)),
-                ("sgp_balanced",   "primary+secondary", (4, 6)),
-                ("sgp_aggressive", "all",               (6, 8)),
+            # ── Build stacking tiers (each tier includes all legs from the previous) ──
+            _shd_safe_sz = _sr.randint(2, 4)
+            _shd_bal_sz  = _sr.randint(4, 6)
+            _shd_agg_sz  = _sr.randint(6, 8)
+
+            _shd_safe = _shd_greedy(_shd_script_pool, _shd_safe_sz, "primary")
+            if len(_shd_safe) < 2:
+                _shd_safe = _shd_script_pool[:_shd_safe_sz]
+
+            _shd_safe_descs = {l.get("desc") for l in _shd_safe}
+            _shd_bal_extras = _shd_greedy(
+                [l for l in _shd_script_pool if l.get("desc") not in _shd_safe_descs],
+                max(0, _shd_bal_sz - len(_shd_safe)), "primary+secondary"
+            )
+            _shd_balanced = _shd_safe + _shd_bal_extras
+            if len(_shd_balanced) < 2:
+                _shd_balanced = _shd_script_pool[:min(_shd_bal_sz, len(_shd_script_pool))]
+
+            _shd_bal_descs  = {l.get("desc") for l in _shd_balanced}
+            _shd_agg_extras = _shd_greedy(
+                [l for l in _shd_script_pool if l.get("desc") not in _shd_bal_descs],
+                max(0, _shd_agg_sz - len(_shd_balanced)), "all"
+            )
+            _shd_aggressive = _shd_balanced + _shd_agg_extras
+            if len(_shd_aggressive) < 2:
+                _shd_aggressive = _shd_script_pool[:min(_shd_agg_sz, len(_shd_script_pool))]
+
+            for tier, _legs in [
+                ("sgp_safe",       _shd_safe),
+                ("sgp_balanced",   _shd_balanced),
+                ("sgp_aggressive", _shd_aggressive),
             ]:
-                _sz   = _sr.randint(*size_range)
-                _legs = _shd_greedy(_shd_script_pool, _sz, role_filter)
                 if len(_legs) < 2:
                     continue
                 _pid = f"{tier}_{game_id}"
@@ -14324,16 +14349,29 @@ def _build_cross_game_parlay(pool):
     bal_size  = random.randint(4, 6)
     agg_size  = random.randint(6, 8)
 
-    safe       = _greedy_cgp(script_pool, safe_size, "primary",          max_per_game=1)
-    balanced   = _greedy_cgp(script_pool, bal_size,  "primary+secondary", max_per_game=2)
-    aggressive = _greedy_cgp(script_pool, agg_size,  "all",              max_per_game=3)
-
-    # ── Fallbacks — ensure minimum viable tiers ───────────────────────
+    # SAFE: best primary-fit legs (1 per game)
+    safe = _greedy_cgp(script_pool, safe_size, "primary", max_per_game=1)
     if len(safe) < 2:
         safe = pool_sorted[:safe_size]
-    if len(balanced) < 4:
+
+    # BALANCED: start from SAFE legs, add primary+secondary extras (up to 2 per game)
+    _cgp_safe_descs = {l.get("desc") for l in safe}
+    _cgp_bal_extras = _greedy_cgp(
+        [l for l in script_pool if l.get("desc") not in _cgp_safe_descs],
+        max(0, bal_size - len(safe)), "primary+secondary", max_per_game=2
+    )
+    balanced = safe + _cgp_bal_extras
+    if len(balanced) < 2:
         balanced = pool_sorted[:min(bal_size, len(pool_sorted))]
-    if len(aggressive) < 6:
+
+    # AGGRESSIVE: start from BALANCED legs, add any remaining extras (up to 3 per game)
+    _cgp_bal_descs  = {l.get("desc") for l in balanced}
+    _cgp_agg_extras = _greedy_cgp(
+        [l for l in script_pool if l.get("desc") not in _cgp_bal_descs],
+        max(0, agg_size - len(balanced)), "all", max_per_game=3
+    )
+    aggressive = balanced + _cgp_agg_extras
+    if len(aggressive) < 2:
         aggressive = pool_sorted[:min(agg_size, len(pool_sorted))]
 
     # ── Ensure at least 2 different games per tier ────────────────────
