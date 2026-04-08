@@ -15785,14 +15785,14 @@ def send_sgp_for_game(game_name, game_legs):
     _SCRIPT_REASON = {
         "TRANSITION_HEAVY":  f"Vegas total {total:.1f} — market pricing a shootout",
         "UPTEMPO":           f"Vegas total {total:.1f} — fast-paced scoring expected",
-        "BLOWOUT":           "Market expects a comfortable win — targeting the favorite's players",
-        "DOUBLE_DIGIT_LEAD": "One team priced to pull away — volume skews to the favorite",
-        "TIGHT_GAME":        "Wire-to-wire battle expected — targeting consistent producers",
+        "BLOWOUT":           f"Spread {spread:.1f} — market expects a comfortable win",
+        "DOUBLE_DIGIT_LEAD": f"Spread {spread:.1f} — one team priced to pull away",
+        "TIGHT_GAME":        f"Spread {spread:.1f} — wire-to-wire battle expected",
         "HALFCOURT":         f"Vegas total {total:.1f} — defensive grind tonight",
         "SLOW_PACED":        f"Vegas total {total:.1f} — slow pace, low scoring",
         "UPSET":             "Model disagrees with Vegas — underdog value detected",
         "INJURY":            "Key injury changes usage — targeting role player spikes",
-        "COMPETITIVE":       "Closely matched teams — balanced usage across both rosters",
+        "COMPETITIVE":       f"Spread {spread:.1f}, total {total:.1f} — balanced matchup",
     }
     _script_display = SCRIPT_LABEL.get(dominant_script, dominant_script)
     _script_reason  = _SCRIPT_REASON.get(dominant_script, "")
