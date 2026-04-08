@@ -348,6 +348,9 @@ CHECKOUT_URL   = (
 # 0 calls on off-days.
 _odds_cache            = ({}, [])   # (moneyline_dict, odds_games_list)
 _odds_cache_hour       = -1         # -1 = never seeded; any other value = seeded
+_odds_full_cache_ts    = 0.0        # epoch time of last get_odds_full() API call
+_ODDS_FULL_CACHE_TTL   = 1800       # 30 min — same as props cache
+_ODDS_FULL_CACHE_FILE  = os.path.join(os.path.dirname(__file__), "..", "odds_full_cache.json")
 _odds_game_fetch_date  = {"early": None}  # ET date string for the day-seed fetch
 _game_cluster_fetched  = set()            # "YYYY-MM-DD HH:MM" keys already fetched
 
@@ -3327,23 +3330,15 @@ def cmd_admins(chat_id):
         lines.append(f"  ESPN CDN: ✅ {int((_time.time()-t0)*1000)}ms")
     except Exception:
         lines.append("  ESPN CDN: ❌ Unreachable")
-    # Odds API
+    # Odds API — read cached quota count (NO live API call — every call costs quota)
     _odds_key = os.getenv("ODDS_API_KEY", "")
     if _odds_key:
-        try:
-            t0 = _time.time()
-            _or = requests.get(
-                "https://api.the-odds-api.com/v4/sports",
-                params={"apiKey": _odds_key}, timeout=5
-            )
-            _rem = _or.headers.get("x-requests-remaining", "?")
-            _used = _or.headers.get("x-requests-used", "?")
-            lines.append(
-                f"  Odds API: ✅ {int((_time.time()-t0)*1000)}ms "
-                f"— {_rem} calls left ({_used} used)"
-            )
-        except Exception:
-            lines.append("  Odds API: ❌ Unreachable")
+        _rem_cached = _odds_quota_remaining
+        _status_icon = "✅" if _rem_cached > _QUOTA_HARD_BLOCK else "⚠️"
+        lines.append(
+            f"  Odds API: {_status_icon} key set "
+            f"— {_rem_cached} calls remaining (cached count, no live check)"
+        )
     else:
         lines.append("  Odds API: ⚠️ Key not set")
     # DB
@@ -7994,13 +7989,72 @@ def _in_game_window() -> bool:
     return False
 
 
+def _load_odds_full_cache_from_disk():
+    """Load the last get_odds_full() result from disk so restarts don't re-fetch."""
+    global _odds_cache, _odds_cache_hour, _odds_full_cache_ts
+    import time as _tm
+    try:
+        if os.path.exists(_ODDS_FULL_CACHE_FILE):
+            with open(_ODDS_FULL_CACHE_FILE, "r") as f:
+                saved = _json.load(f)
+            age = _tm.time() - saved.get("ts", 0)
+            if age < _ODDS_FULL_CACHE_TTL:
+                ml   = saved.get("moneyline", {})
+                data = saved.get("data", [])
+                _odds_cache        = (ml, data)
+                _odds_cache_hour   = 1          # mark seeded so run_odds() won't re-fetch
+                _odds_full_cache_ts = saved.get("ts", _tm.time())
+                print(f"[OddsFull] Loaded from disk cache — {int(age)}s old, "
+                      f"{len(data)} games")
+            else:
+                print(f"[OddsFull] Disk cache expired ({int(age)}s old) — will re-fetch when needed")
+    except Exception as e:
+        print(f"[OddsFull] disk cache load error: {e}")
+
+
+def _save_odds_full_cache_to_disk(moneyline: dict, data: list):
+    """Persist the last get_odds_full() result so bot restarts don't burn the API."""
+    import time as _tm
+    try:
+        payload = {"ts": _tm.time(), "moneyline": moneyline, "data": data}
+        with open(_ODDS_FULL_CACHE_FILE, "w") as f:
+            _json.dump(payload, f)
+        print(f"[OddsFull] Saved {len(data)} games to disk cache")
+    except Exception as e:
+        print(f"[OddsFull] disk cache save error: {e}")
+
+
 def get_odds_full():
-    """Returns dict of team -> moneyline price, plus raw game objects for spreads/totals."""
+    """Returns dict of team -> moneyline price, plus raw game objects for spreads/totals.
+
+    Cache policy:
+      - In-memory result reused for 30 minutes (TTL = _ODDS_FULL_CACHE_TTL).
+      - Result saved to disk after every successful fetch — bot restarts load from
+        disk so they never need a fresh API call just to reseed the cache.
+      - HARD BLOCK: if quota ≤ _QUOTA_HARD_BLOCK, return whatever is in cache.
+    """
+    import time as _tm
+    global _odds_cache, _odds_full_cache_ts
+
     if not ODDS_API_KEY:
         return {}, []
+
+    # ── Hard block: quota critically low — return cached data ─────────────────
+    if _odds_quota_remaining <= _QUOTA_HARD_BLOCK:
+        print(f"[OddsFull] 🛑 QUOTA HARD BLOCK — {_odds_quota_remaining} remaining, "
+              f"returning cached data")
+        return _odds_cache if isinstance(_odds_cache, tuple) else ({}, [])
+
+    # ── TTL cache: still fresh? ───────────────────────────────────────────────
+    elapsed = _tm.time() - _odds_full_cache_ts
+    if elapsed < _ODDS_FULL_CACHE_TTL and _odds_cache_hour != -1:
+        print(f"[OddsFull] Cache hit — {int(_ODDS_FULL_CACHE_TTL - elapsed)}s until next fetch")
+        return _odds_cache
+
     if not _in_game_window():
         print("[OddsAPI] Outside game window — skipping get_odds_full")
-        return {}, []
+        return _odds_cache if _odds_cache_hour != -1 else ({}, [])
+
     try:
         resp = requests.get(
             f"https://api.the-odds-api.com/v4/sports/basketball_nba/odds/"
@@ -8011,7 +8065,7 @@ def get_odds_full():
         data = resp.json()
         if not isinstance(data, list):
             print(f"get_odds_full unexpected response: {data}")
-            return {}, []
+            return _odds_cache if _odds_cache_hour != -1 else ({}, [])
         moneyline = {}
         for g in data:
             try:
@@ -8026,10 +8080,12 @@ def get_odds_full():
                         moneyline[g["away_team"]] = o[1]["price"]
             except Exception:
                 continue
+        _odds_full_cache_ts = _tm.time()
+        _save_odds_full_cache_to_disk(moneyline, data)
         return moneyline, data
     except Exception as e:
         print(f"get_odds_full error: {e}")
-        return {}, []
+        return _odds_cache if _odds_cache_hour != -1 else ({}, [])
 
 
 _props_cache        = []   # cached props data
@@ -13515,8 +13571,14 @@ def _fire_prop_wave():
 
     print(f"[PropWave] Firing prop wave for {today_str} — force-fetching all game props...")
 
-    # Force refresh the prop cache for all tonight's games at once
-    get_player_props(force=True)
+    # Force refresh the prop cache — but respect the hard block if quota is critical
+    if _odds_quota_remaining <= _QUOTA_HARD_BLOCK:
+        print(f"[PropWave] 🛑 Quota hard block ({_odds_quota_remaining} remaining) — "
+              f"using disk cache instead of force-fetch")
+        if not _props_cache:
+            _load_props_cache_from_disk()
+    else:
+        get_player_props(force=True)
 
     # Score and send props (saves to DB + populates _todays_parlay_legs)
     try:
@@ -15653,8 +15715,9 @@ def main():
         print(f"[Startup] auto_adjust check error: {_sae}")
 
     # ── Restore persisted state before first run ──────────────────────────────
-    _load_quota_state()           # know how many API calls are left from before restart
-    _load_props_cache_from_disk() # restore last fetched props so restart doesn't burn quota
+    _load_quota_state()                # know how many API calls are left from before restart
+    _load_props_cache_from_disk()      # restore last fetched props so restart doesn't burn quota
+    _load_odds_full_cache_from_disk()  # restore h2h/spreads/totals so restarts don't re-fetch
 
     once = "--once" in sys.argv
 
