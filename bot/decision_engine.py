@@ -3324,3 +3324,71 @@ def purge_context_trackers(active_game_ids: list) -> None:
     stale = [gid for gid in _context_registry if gid not in active_game_ids]
     for gid in stale:
         del _context_registry[gid]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SHOT EFFICIENCY SIGNAL — uses CDN play-by-play data stored in player_observations
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_shot_efficiency_signal(conn, player_name: str, stat_type: str,
+                               lookback_games: int = 5) -> float:
+    """
+    Returns a confidence multiplier (0.85–1.15) based on recent shot efficiency
+    pulled from player_observations (populated by CDN play-by-play).
+
+    stat_type:
+      "threes"   → uses fg3a/fg3m — hot from three boosts, cold penalises
+      "points"   → uses all shot types combined
+      "rebounds" → shot-agnostic, returns 1.0 (no signal)
+      "assists"  → shot-agnostic, returns 1.0
+
+    Returns 1.0 (neutral) if insufficient data.
+    """
+    if stat_type not in ("threes", "points"):
+        return 1.0
+
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT fg3a, fg3m, rim_a, rim_m, mid_a, mid_m
+            FROM player_observations
+            WHERE player_name = %s
+              AND (fg3a + rim_a + mid_a) > 0
+            ORDER BY observed_at DESC
+            LIMIT %s
+        """, (player_name, lookback_games))
+        rows = cur.fetchall()
+        cur.close()
+    except Exception:
+        return 1.0
+
+    if not rows:
+        return 1.0
+
+    if stat_type == "threes":
+        total_fg3a = sum(r[0] for r in rows)
+        total_fg3m = sum(r[1] for r in rows)
+        if total_fg3a < 5:          # Need at least 5 attempts for signal
+            return 1.0
+        pct = total_fg3m / total_fg3a
+        # NBA average 3PT% ≈ 36%
+        if pct >= 0.44:   return 1.12    # Running very hot from three
+        if pct >= 0.40:   return 1.06    # Above average
+        if pct <= 0.28:   return 0.88    # Very cold from three
+        if pct <= 0.32:   return 0.94    # Below average
+        return 1.0                       # Around average — neutral
+
+    if stat_type == "points":
+        total_att = sum(r[0]+r[2]+r[4] for r in rows)
+        total_made = sum(r[1]+r[3]+r[5] for r in rows)
+        if total_att < 10:
+            return 1.0
+        pct = total_made / total_att
+        # NBA average FG% ≈ 46%
+        if pct >= 0.54:   return 1.10
+        if pct >= 0.50:   return 1.05
+        if pct <= 0.36:   return 0.90
+        if pct <= 0.40:   return 0.95
+        return 1.0
+
+    return 1.0
