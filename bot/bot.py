@@ -2421,7 +2421,7 @@ def _cleanup_parlay_grades():
 
         for game, bet_date, total, wins, losses, nulls in sgp_groups:
             if losses > 0:
-                # Parlay already busted — mark remaining nulls as loss
+                # Parlay already busted — propagate loss to remaining NULL legs
                 cur.execute("""
                     UPDATE bets SET result = 'loss'
                     WHERE pick_category = 'SGP'
@@ -2432,7 +2432,8 @@ def _cleanup_parlay_grades():
                 total_graded += cur.rowcount
                 print(f"[ParlayCleanup] SGP bust propagated: {game} {bet_date} — {cur.rowcount} legs → loss")
             else:
-                # All still NULL or some win + remaining NULL — void unresolvable nulls
+                # All legs still NULL — live monitor never caught them, void so they
+                # don't drag down win rate
                 cur.execute("""
                     UPDATE bets SET result = 'void'
                     WHERE pick_category = 'SGP'
