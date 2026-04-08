@@ -4596,48 +4596,52 @@ def _refresh_matchup_data(season: str = "2024-25") -> None:
         if not conn:
             return
         cur = conn.cursor()
+        try:
+            for row in row_set:
+                off   = (row[i_off]   or "").strip()
+                defd  = (row[i_def]   or "").strip()
+                dteam = (row[i_dteam] or "").strip()
+                poss  = float(row[i_poss]  or 0)
+                fgpct = float(row[i_fgpct] or 0) if i_fgpct >= 0 else 0.0
+                fg3p  = float(row[i_fg3p]  or 0) if i_fg3p  >= 0 else 0.0
+                pts   = float(row[i_pts]   or 0) if i_pts   >= 0 else 0.0
 
-        for row in row_set:
-            off   = (row[i_off]   or "").strip()
-            defd  = (row[i_def]   or "").strip()
-            dteam = (row[i_dteam] or "").strip()
-            poss  = float(row[i_poss]  or 0)
-            fgpct = float(row[i_fgpct] or 0) if i_fgpct >= 0 else 0.0
-            fg3p  = float(row[i_fg3p]  or 0) if i_fg3p  >= 0 else 0.0
-            pts   = float(row[i_pts]   or 0) if i_pts   >= 0 else 0.0
+                if poss < 3 or not off or not defd:
+                    continue
 
-            if poss < 3 or not off or not defd:
-                continue
+                pts_per_poss = round(pts / poss, 4) if poss > 0 else 0.0
 
-            pts_per_poss = round(pts / poss, 4) if poss > 0 else 0.0
+                try:
+                    cur.execute("""
+                        INSERT INTO player_matchups
+                            (off_player, def_player, def_team, season,
+                             partial_poss, matchup_fg_pct, matchup_fg3_pct,
+                             pts_per_poss, updated_at)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                        ON CONFLICT (off_player, def_player, season) DO UPDATE SET
+                            def_team        = EXCLUDED.def_team,
+                            partial_poss    = EXCLUDED.partial_poss,
+                            matchup_fg_pct  = EXCLUDED.matchup_fg_pct,
+                            matchup_fg3_pct = EXCLUDED.matchup_fg3_pct,
+                            pts_per_poss    = EXCLUDED.pts_per_poss,
+                            updated_at      = NOW()
+                    """, (off, defd, dteam, season, poss, fgpct, fg3p, pts_per_poss))
+                    rows_written += 1
+                except Exception as _ue:
+                    print(f"[Matchup] upsert err {off}/{defd}: {_ue}")
 
+            conn.commit()
+            cur.close()
+            _last_matchup_refresh_date = today
+            print(f"[Matchup] Done — {rows_written:,} matchup pairs upserted")
+
+        except Exception as e:
+            print(f"[Matchup] Parse/write error: {e}")
+        finally:
             try:
-                cur.execute("""
-                    INSERT INTO player_matchups
-                        (off_player, def_player, def_team, season,
-                         partial_poss, matchup_fg_pct, matchup_fg3_pct,
-                         pts_per_poss, updated_at)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NOW())
-                    ON CONFLICT (off_player, def_player, season) DO UPDATE SET
-                        def_team        = EXCLUDED.def_team,
-                        partial_poss    = EXCLUDED.partial_poss,
-                        matchup_fg_pct  = EXCLUDED.matchup_fg_pct,
-                        matchup_fg3_pct = EXCLUDED.matchup_fg3_pct,
-                        pts_per_poss    = EXCLUDED.pts_per_poss,
-                        updated_at      = NOW()
-                """, (off, defd, dteam, season, poss, fgpct, fg3p, pts_per_poss))
-                rows_written += 1
-            except Exception as _ue:
-                print(f"[Matchup] upsert err {off}/{defd}: {_ue}")
-
-        conn.commit()
-        cur.close()
-        conn.close()
-        _last_matchup_refresh_date = today
-        print(f"[Matchup] Done — {rows_written:,} matchup pairs upserted")
-
-    except Exception as e:
-        print(f"[Matchup] Parse/write error: {e}")
+                conn.close()
+            except Exception:
+                pass
 
 
 def _cdn_live_tracker():
