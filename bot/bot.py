@@ -14349,29 +14349,16 @@ def _build_cross_game_parlay(pool):
     bal_size  = random.randint(4, 6)
     agg_size  = random.randint(6, 8)
 
-    # SAFE: best primary-fit legs (1 per game)
-    safe = _greedy_cgp(script_pool, safe_size, "primary", max_per_game=1)
+    safe       = _greedy_cgp(script_pool, safe_size, "primary",          max_per_game=1)
+    balanced   = _greedy_cgp(script_pool, bal_size,  "primary+secondary", max_per_game=2)
+    aggressive = _greedy_cgp(script_pool, agg_size,  "all",              max_per_game=3)
+
+    # ── Fallbacks — ensure minimum viable tiers ───────────────────────
     if len(safe) < 2:
         safe = pool_sorted[:safe_size]
-
-    # BALANCED: start from SAFE legs, add primary+secondary extras (up to 2 per game)
-    _cgp_safe_descs = {l.get("desc") for l in safe}
-    _cgp_bal_extras = _greedy_cgp(
-        [l for l in script_pool if l.get("desc") not in _cgp_safe_descs],
-        max(0, bal_size - len(safe)), "primary+secondary", max_per_game=2
-    )
-    balanced = safe + _cgp_bal_extras
-    if len(balanced) < 2:
+    if len(balanced) < 4:
         balanced = pool_sorted[:min(bal_size, len(pool_sorted))]
-
-    # AGGRESSIVE: start from BALANCED legs, add any remaining extras (up to 3 per game)
-    _cgp_bal_descs  = {l.get("desc") for l in balanced}
-    _cgp_agg_extras = _greedy_cgp(
-        [l for l in script_pool if l.get("desc") not in _cgp_bal_descs],
-        max(0, agg_size - len(balanced)), "all", max_per_game=3
-    )
-    aggressive = balanced + _cgp_agg_extras
-    if len(aggressive) < 2:
+    if len(aggressive) < 6:
         aggressive = pool_sorted[:min(agg_size, len(pool_sorted))]
 
     # ── Ensure at least 2 different games per tier ────────────────────
