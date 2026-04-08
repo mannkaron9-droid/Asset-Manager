@@ -1050,8 +1050,8 @@ def run_pick_through_engine(
 
 # Self-learning channel confidence floors (VIP/Free)
 _channel_floors: dict = {
-    "VIP":  {"floor": 72.0, "hits": 0, "total": 0},
-    "FREE": {"floor": 65.0, "hits": 0, "total": 0},
+    "VIP":  {"floor": 65.0, "hits": 0, "total": 0},
+    "FREE": {"floor": 60.0, "hits": 0, "total": 0},
 }
 
 # Self-learning Kelly fraction
@@ -1065,13 +1065,15 @@ _l9_tier_cache: dict = {"tier": "AVG", "thresh": {}, "ts": 0.0}
 def _get_channel_floor(channel: str) -> float:
     """Return current self-calibrated confidence floor for VIP or FREE."""
     d = _channel_floors.get(channel.upper(), _channel_floors["VIP"])
+    _max_floor = 72.0 if channel.upper() == "VIP" else 68.0
+    _min_floor = 60.0
     if d["total"] < 20:
-        return d["floor"]
+        return min(d["floor"], _max_floor)
     hit_rate = d["hits"] / d["total"]
     if hit_rate >= 0.65:
-        d["floor"] = max(d["floor"] - 0.5, 60.0)  # performing well → ease floor
+        d["floor"] = max(d["floor"] - 0.5, _min_floor)  # performing well → ease floor
     elif hit_rate < 0.55:
-        d["floor"] = min(d["floor"] + 0.5, 82.0)  # underperforming → raise bar
+        d["floor"] = min(d["floor"] + 0.5, _max_floor)  # underperforming → raise bar
     return d["floor"]
 
 
@@ -2244,7 +2246,13 @@ def _pe_load(conn):
                     elif target == "_exposure_tracker":            _exposure_tracker = val
                     elif target == "_conflict_db":                 _conflict_db = val
                     elif target == "_pattern_adjustments":         _pattern_adjustments = val
-                    elif target == "_channel_floors":              _channel_floors.update(val)
+                    elif target == "_channel_floors":
+                        _channel_floors.update(val)
+                        # Cap floors so a losing streak can never fully block picks
+                        if _channel_floors.get("VIP", {}).get("floor", 0) > 72.0:
+                            _channel_floors["VIP"]["floor"] = 65.0
+                        if _channel_floors.get("FREE", {}).get("floor", 0) > 68.0:
+                            _channel_floors["FREE"]["floor"] = 60.0
                     elif target == "_kelly_tracker":               _kelly_tracker.update(val)
                     elif target == "_ml_weight_tracker":           _ml_weight_tracker.update(val)
                     elif target == "_role_threshold_adjustments":  _role_threshold_adjustments.update(val)
