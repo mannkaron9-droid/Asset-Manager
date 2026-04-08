@@ -431,7 +431,7 @@ def debug_bets():
             info["db_count"]      = cnt or 0
             info["db_ok"]         = True
             info["latest_db_bet"] = str(latest) if latest else None
-            cur.execute("SELECT key, value FROM bot_status WHERE key IN ('lastRun','picksToday')")
+            cur.execute("SELECT key, value FROM bot_status WHERE key IN ('lastRun','picksToday','last_save_error')")
             for k, v in cur.fetchall():
                 info[f"status_{k}"] = v
             # ── Odds API quota from learning_data ──────────────────────────
@@ -458,6 +458,28 @@ def debug_bets():
             try: conn.close()
             except Exception: pass
     return jsonify(info)
+
+
+@app.route("/api/debug/schema", methods=["GET"])
+def debug_schema():
+    conn = _db_conn()
+    if not conn:
+        return jsonify({"error": "no db"})
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT column_name, data_type, character_maximum_length
+            FROM information_schema.columns
+            WHERE table_name = 'bets'
+            ORDER BY ordinal_position
+        """)
+        cols = [{"col": r[0], "type": r[1], "maxlen": r[2]} for r in cur.fetchall()]
+        cur.close(); conn.close()
+        return jsonify({"bets_columns": cols})
+    except Exception as e:
+        try: conn.close()
+        except Exception: pass
+        return jsonify({"error": str(e)})
 
 
 # ── Schedule ───────────────────────────────────────────────────────────────────
