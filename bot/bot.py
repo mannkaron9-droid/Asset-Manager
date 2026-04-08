@@ -7990,38 +7990,40 @@ def _in_game_window() -> bool:
 
 
 def _load_odds_full_cache_from_disk():
-    """Load the last get_odds_full() result from disk so restarts don't re-fetch."""
+    """Load the last get_odds_full() result from DB so restarts don't re-fetch.
+    (Name kept for compatibility — now DB-backed, not disk.)"""
     global _odds_cache, _odds_cache_hour, _odds_full_cache_ts
     import time as _tm
     try:
-        if os.path.exists(_ODDS_FULL_CACHE_FILE):
-            with open(_ODDS_FULL_CACHE_FILE, "r") as f:
-                saved = _json.load(f)
-            age = _tm.time() - saved.get("ts", 0)
-            if age < _ODDS_FULL_CACHE_TTL:
-                ml   = saved.get("moneyline", {})
-                data = saved.get("data", [])
-                _odds_cache        = (ml, data)
-                _odds_cache_hour   = 1          # mark seeded so run_odds() won't re-fetch
-                _odds_full_cache_ts = saved.get("ts", _tm.time())
-                print(f"[OddsFull] Loaded from disk cache — {int(age)}s old, "
-                      f"{len(data)} games")
-            else:
-                print(f"[OddsFull] Disk cache expired ({int(age)}s old) — will re-fetch when needed")
+        saved = _db_load_cache("odds_full_cache")
+        if not saved:
+            print("[OddsFull] No DB cache entry — will fetch when needed")
+            return
+        age = _tm.time() - saved.get("ts", 0)
+        if age < _ODDS_FULL_CACHE_TTL:
+            ml   = saved.get("moneyline", {})
+            data = saved.get("data", [])
+            _odds_cache         = (ml, data)
+            _odds_cache_hour    = 1
+            _odds_full_cache_ts = saved.get("ts", _tm.time())
+            print(f"[OddsFull] Loaded from DB cache — {int(age)}s old, {len(data)} games")
+        else:
+            print(f"[OddsFull] DB cache expired ({int(age)}s old) — will re-fetch when needed")
     except Exception as e:
-        print(f"[OddsFull] disk cache load error: {e}")
+        print(f"[OddsFull] DB cache load error: {e}")
 
 
 def _save_odds_full_cache_to_disk(moneyline: dict, data: list):
-    """Persist the last get_odds_full() result so bot restarts don't burn the API."""
+    """Persist the last get_odds_full() result to DB so restarts don't burn the API.
+    (Name kept for compatibility — now DB-backed, not disk.)"""
     import time as _tm
     try:
-        payload = {"ts": _tm.time(), "moneyline": moneyline, "data": data}
-        with open(_ODDS_FULL_CACHE_FILE, "w") as f:
-            _json.dump(payload, f)
-        print(f"[OddsFull] Saved {len(data)} games to disk cache")
+        _db_upsert_cache("odds_full_cache", {
+            "ts": _tm.time(), "moneyline": moneyline, "data": data
+        })
+        print(f"[OddsFull] Saved {len(data)} games to DB cache")
     except Exception as e:
-        print(f"[OddsFull] disk cache save error: {e}")
+        print(f"[OddsFull] DB cache save error: {e}")
 
 
 def get_odds_full():
@@ -8102,58 +8104,101 @@ _QUOTA_HARD_BLOCK  = 5     # if remaining ≤ this, never call the API — prote
 _odds_quota_remaining: int = 999   # last known remaining count — persisted across restarts
 
 
+def _db_upsert_cache(key: str, payload: dict):
+    """Write a JSON payload to learning_data. Used for all cross-restart caching."""
+    try:
+        conn = _db_conn()
+        if not conn:
+            return
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO learning_data (key, value, updated_at)
+            VALUES (%s, %s::jsonb, NOW())
+            ON CONFLICT (key) DO UPDATE
+                SET value = EXCLUDED.value, updated_at = NOW()
+        """, (key, _json.dumps(payload)))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[DBCache] upsert '{key}' error: {e}")
+
+
+def _db_load_cache(key: str) -> dict:
+    """Read a JSON payload from learning_data. Returns {} if missing or error."""
+    try:
+        conn = _db_conn()
+        if not conn:
+            return {}
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM learning_data WHERE key = %s", (key,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row:
+            val = row[0]
+            return val if isinstance(val, dict) else _json.loads(val)
+    except Exception as e:
+        print(f"[DBCache] load '{key}' error: {e}")
+    return {}
+
+
 def _load_quota_state():
-    """Load persisted quota count from disk so restarts don't lose the count."""
+    """Load persisted quota count from DB so Railway restarts don't lose the count."""
     global _odds_quota_remaining
     try:
-        if os.path.exists(_QUOTA_STATE_FILE):
-            data = json.load(open(_QUOTA_STATE_FILE))
+        data = _db_load_cache("odds_quota_state")
+        if data:
             _odds_quota_remaining = int(data.get("remaining", 999))
-            print(f"[Quota] Loaded from disk: {_odds_quota_remaining} remaining")
+            print(f"[Quota] Loaded from DB: {_odds_quota_remaining} remaining")
+        else:
+            print("[Quota] No DB entry yet — defaulting to 999")
     except Exception as e:
         print(f"[Quota] load error: {e}")
 
 
 def _save_quota_state(remaining: int):
-    """Persist quota count to disk so restarts still know how many calls are left."""
+    """Persist quota count to DB so Railway restarts still know how many calls are left."""
     global _odds_quota_remaining
     _odds_quota_remaining = remaining
-    try:
-        json.dump({"remaining": remaining, "updated": str(datetime.now())},
-                  open(_QUOTA_STATE_FILE, "w"))
-    except Exception:
-        pass
+    _db_upsert_cache("odds_quota_state", {
+        "remaining": remaining,
+        "updated": str(datetime.now())
+    })
 
 
 def _load_props_cache_from_disk():
-    """Load the last saved props cache from disk on startup."""
+    """Load the last saved props cache from DB on startup.
+    (Name kept for compatibility — now DB-backed, not disk.)"""
     global _props_cache, _props_cache_ts
     try:
-        if os.path.exists(_PROPS_CACHE_FILE):
-            data = json.load(open(_PROPS_CACHE_FILE))
-            saved_ts  = float(data.get("ts", 0))
-            saved_data = data.get("props", [])
-            age = time.time() - saved_ts
-            # Only restore if cache is < 6 hours old (props valid for same day)
-            if saved_data and age < 21600:
-                _props_cache    = saved_data
-                _props_cache_ts = saved_ts
-                print(f"[Props] Restored {len(saved_data)} games from disk cache "
-                      f"(age {int(age//60)}m)")
-            else:
-                print(f"[Props] Disk cache too old ({int(age//3600)}h) — will re-fetch")
+        data = _db_load_cache("odds_props_cache")
+        if not data:
+            print("[Props] No DB cache entry — will fetch when needed")
+            return
+        saved_ts   = float(data.get("ts", 0))
+        saved_data = data.get("props", [])
+        age = time.time() - saved_ts
+        # Props are valid for the same calendar day (up to 6 hours old)
+        if saved_data and age < 21600:
+            _props_cache    = saved_data
+            _props_cache_ts = saved_ts
+            print(f"[Props] Restored {len(saved_data)} games from DB cache "
+                  f"(age {int(age//60)}m)")
+        else:
+            print(f"[Props] DB cache too old ({int(age//3600)}h) — will re-fetch")
     except Exception as e:
-        print(f"[Props] disk cache load error: {e}")
+        print(f"[Props] DB cache load error: {e}")
 
 
 def _save_props_cache_to_disk(props: list):
-    """Persist props to disk so bot restarts don't burn API calls."""
+    """Persist props to DB so Railway restarts don't burn API calls.
+    (Name kept for compatibility — now DB-backed, not disk.)"""
     try:
-        json.dump({"ts": time.time(), "props": props},
-                  open(_PROPS_CACHE_FILE, "w"))
-        print(f"[Props] Saved {len(props)} games to disk cache")
+        _db_upsert_cache("odds_props_cache", {"ts": time.time(), "props": props})
+        print(f"[Props] Saved {len(props)} games to DB cache")
     except Exception as e:
-        print(f"[Props] disk cache save error: {e}")
+        print(f"[Props] DB cache save error: {e}")
 
 def get_player_props(force=False):
     """
