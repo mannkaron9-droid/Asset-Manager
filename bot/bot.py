@@ -12223,64 +12223,9 @@ def run_full_system():
             if not player_data:
                 continue
 
-            # Split by team using keyword matching
-            # Use bdl_team (validated at team gate) as primary source;
-            # fall back to stats["team"] if bdl_team is empty.
-            # If neither matches, assign to the correct team using the
-            # props' own game field (player is already validated to belong
-            # to this game, so "other" is treated as away).
-            away_words = set(w for w in away_team.lower().split() if len(w) > 2)
-            home_words  = set(w for w in home_team.lower().split() if len(w) > 2)
-            buckets = {"away": {}, "home": {}, "other": {}}
-            for p, d in player_data.items():
-                # Prefer validated BDL team, fall back to stats team
-                _team_str = (d.get("bdl_team") or d.get("team") or "").lower()
-                tw = set(w for w in _team_str.split() if len(w) > 2)
-                if tw & away_words:
-                    buckets["away"][p] = d
-                elif tw & home_words:
-                    buckets["home"][p] = d
-                else:
-                    # Team data missing/ambiguous — use props source as tiebreaker.
-                    # Players are already game-validated so put in away by default.
-                    print(f"  [Bucket] {p} team '{_team_str}' unresolved — assigning to away ({away_team})")
-                    buckets["away"][p] = d
-
-            def player_line(p, d):
-                pos = f" · {d['position']}" if d["position"] else ""
-                return f"{d['dot']} *{p}*{pos}"
-
-            sections = []
-            if buckets["away"]:
-                label = away_team.split()[-1].upper()
-                sections.append(
-                    f"━━━ *{label}* ━━━\n" +
-                    "\n\n".join(player_line(p, d) for p, d in buckets["away"].items())
-                )
-            if buckets["home"]:
-                label = home_team.split()[-1].upper()
-                sections.append(
-                    f"━━━ *{label}* ━━━\n" +
-                    "\n\n".join(player_line(p, d) for p, d in buckets["home"].items())
-                )
-            if buckets["other"]:
-                sections.append(
-                    "\n\n".join(player_line(p, d) for p, d in buckets["other"].items())
-                )
-
-            # Elite picks section
-            all_elite_lines = []
-            for d in player_data.values():
-                all_elite_lines.extend(d["elite_picks"])
-            if all_elite_lines:
-                sections.append("━━━ *🎯 ELITE PICKS* ━━━\n" + "\n".join(all_elite_lines))
-
-            msg = (
-                f"🏀 *ELITE PLAYER PROPS*\n"
-                f"_{game}_\n\n"
-                + "\n\n".join(sections)
-            )
-            send("🔒 *VIP LOCK*\n\n" + msg, VIP_CHANNEL)
+            # Elite Player Props card removed — picks are scored and saved
+            # to DB for model learning but no longer sent to the channel.
+            # VIPs get the same legs through SGP and CGP instead.
             _props_sent_today.add(game_prop_key)
             save_status(0, {"_props_date": _props_today, "_props_sent": list(_props_sent_today)})
             # Save each elite prop pick to DB for live tracking
@@ -13772,10 +13717,6 @@ def _fire_prop_wave():
                 by_game.setdefault(g, []).append(leg)
         for game_name, game_legs in by_game.items():
             if len(game_legs) >= 2:
-                try:
-                    send_elite_player_props(game_name, game_legs)
-                except Exception as _ep_err:
-                    print(f"[PropWave] EliteProps error {game_name}: {_ep_err}")
                 try:
                     send_sgp_for_game(game_name, game_legs)
                 except Exception as _sgp_err:
