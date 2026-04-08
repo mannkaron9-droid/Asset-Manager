@@ -409,6 +409,24 @@ def debug_bets():
             cur.execute("SELECT key, value FROM bot_status WHERE key IN ('lastRun','picksToday')")
             for k, v in cur.fetchall():
                 info[f"status_{k}"] = v
+            # ── Odds API quota from learning_data ──────────────────────────
+            cur.execute("SELECT value FROM learning_data WHERE key = 'odds_quota_state'")
+            qrow = cur.fetchone()
+            if qrow:
+                try:
+                    import json as _j
+                    qdata = _j.loads(qrow[0]) if isinstance(qrow[0], str) else qrow[0]
+                    info["odds_quota_remaining"] = qdata.get("remaining", "?")
+                    info["odds_quota_updated"]   = qdata.get("updated", "?")
+                except Exception:
+                    info["odds_quota_raw"] = str(qrow[0])[:100]
+            else:
+                info["odds_quota_remaining"] = "not_saved_yet (default=999)"
+            # ── Prop wave fired date ────────────────────────────────────────
+            cur.execute("SELECT value FROM bot_status WHERE key = '_mem_odds_fetch_date'")
+            pfrow = cur.fetchone()
+            if pfrow:
+                info["odds_fetch_date"] = str(pfrow[0])[:100]
             cur.close(); conn.close()
         except Exception as e:
             info["db_error"] = str(e)
