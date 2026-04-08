@@ -8667,14 +8667,29 @@ def _db_load_cache(key: str) -> dict:
     return {}
 
 
+def _api_key_fingerprint() -> str:
+    """Return last 6 chars of current ODDS_API_KEY as a cheap change-detector."""
+    key = os.environ.get("ODDS_API_KEY", "")
+    return key[-6:] if len(key) >= 6 else key
+
+
 def _load_quota_state():
-    """Load persisted quota count from DB so Railway restarts don't lose the count."""
+    """Load persisted quota count from DB.
+    If the API key has changed since last save, reset quota to 500 automatically."""
     global _odds_quota_remaining
     try:
         data = _db_load_cache("odds_quota_state")
         if data:
-            _odds_quota_remaining = int(data.get("remaining", 999))
-            print(f"[Quota] Loaded from DB: {_odds_quota_remaining} remaining")
+            saved_fp = data.get("api_key_fp", "")
+            current_fp = _api_key_fingerprint()
+            if saved_fp and current_fp and saved_fp != current_fp:
+                # Key changed — user renewed/swapped their Odds API key
+                _odds_quota_remaining = 500
+                _save_quota_state(500)
+                print(f"[Quota] API key changed — quota auto-reset to 500")
+            else:
+                _odds_quota_remaining = int(data.get("remaining", 999))
+                print(f"[Quota] Loaded from DB: {_odds_quota_remaining} remaining")
         else:
             print("[Quota] No DB entry yet — defaulting to 999")
     except Exception as e:
@@ -8682,11 +8697,12 @@ def _load_quota_state():
 
 
 def _save_quota_state(remaining: int):
-    """Persist quota count to DB so Railway restarts still know how many calls are left."""
+    """Persist quota count + current key fingerprint to DB."""
     global _odds_quota_remaining
     _odds_quota_remaining = remaining
     _db_upsert_cache("odds_quota_state", {
         "remaining": remaining,
+        "api_key_fp": _api_key_fingerprint(),
         "updated": str(datetime.now())
     })
 
