@@ -519,25 +519,37 @@ def reset_quota():
     else:
         result["in_memory"] = "bot not started yet"
 
-    # 2. Update the DB cache so it persists across restarts
-    conn = _db_conn()
-    if conn:
+    # 2. Update the DB via the bot module's own upsert so format matches exactly
+    if _bot_module is not None:
         try:
-            cur = conn.cursor()
-            payload = _j.dumps({"remaining": new_val, "updated": datetime.utcnow().isoformat()})
-            cur.execute(
-                "INSERT INTO learning_data (key, value) VALUES ('odds_quota_state', %s) "
-                "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
-                (payload,)
-            )
-            conn.commit(); cur.close(); conn.close()
-            result["db"] = f"odds_quota_state set to {new_val}"
+            _bot_module._db_upsert_cache("odds_quota_state", {
+                "remaining": new_val,
+                "api_key_fp": _bot_module._api_key_fingerprint(),
+                "updated": datetime.utcnow().isoformat(),
+            })
+            result["db"] = f"odds_quota_state set to {new_val} (with key fingerprint)"
         except Exception as e:
-            result["db"] = f"error: {e}"
-            try: conn.close()
-            except Exception: pass
+            result["db"] = f"bot upsert error: {e}"
     else:
-        result["db"] = "no db connection"
+        # Fallback: write directly if bot module not loaded yet
+        conn = _db_conn()
+        if conn:
+            try:
+                cur = conn.cursor()
+                payload = _j.dumps({"remaining": new_val, "updated": datetime.utcnow().isoformat()})
+                cur.execute(
+                    "INSERT INTO learning_data (key, value, updated_at) VALUES ('odds_quota_state', %s::jsonb, NOW()) "
+                    "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
+                    (payload,)
+                )
+                conn.commit(); cur.close(); conn.close()
+                result["db"] = f"odds_quota_state set to {new_val} (direct)"
+            except Exception as e:
+                result["db"] = f"error: {e}"
+                try: conn.close()
+                except Exception: pass
+        else:
+            result["db"] = "no db connection"
 
     return jsonify({"ok": True, "new_quota": new_val, **result})
 
