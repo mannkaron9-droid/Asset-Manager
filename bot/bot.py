@@ -260,12 +260,44 @@ def _db_init():
         cur.execute("ALTER TABLE shadow_picks ADD COLUMN IF NOT EXISTS implied_prob FLOAT DEFAULT NULL")
         cur.execute("ALTER TABLE shadow_picks ADD COLUMN IF NOT EXISTS parlay_id   TEXT DEFAULT NULL")
 
-        # ── Shot distribution columns — populated from CDN play-by-play ──────
-        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS fg3a    INTEGER DEFAULT 0")
-        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS rim_a   INTEGER DEFAULT 0")
-        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS rim_m   INTEGER DEFAULT 0")
-        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS mid_a   INTEGER DEFAULT 0")
-        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS mid_m   INTEGER DEFAULT 0")
+        # ── Shot distribution + live tracking columns (CDN play-by-play) ───────
+        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS fg3a         INTEGER DEFAULT 0")
+        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS rim_a        INTEGER DEFAULT 0")
+        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS rim_m        INTEGER DEFAULT 0")
+        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS mid_a        INTEGER DEFAULT 0")
+        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS mid_m        INTEGER DEFAULT 0")
+        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS turnovers    INTEGER DEFAULT 0")
+        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS fta          INTEGER DEFAULT 0")
+        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS ftm          INTEGER DEFAULT 0")
+        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS pf           INTEGER DEFAULT 0")
+        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS oreb         INTEGER DEFAULT 0")
+        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS dreb         INTEGER DEFAULT 0")
+        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS rest_days    INTEGER DEFAULT 0")
+        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS opp_def_rating FLOAT DEFAULT 0")
+        cur.execute("ALTER TABLE player_observations ADD COLUMN IF NOT EXISTS touches      INTEGER DEFAULT 0")
+
+        # ── Quarter-by-quarter scoring ────────────────────────────────────────
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS game_quarters (
+                id          SERIAL PRIMARY KEY,
+                game_id     TEXT NOT NULL,
+                game_date   TEXT NOT NULL,
+                home_team   TEXT NOT NULL,
+                away_team   TEXT NOT NULL,
+                q1_home     INTEGER DEFAULT 0,
+                q1_away     INTEGER DEFAULT 0,
+                q2_home     INTEGER DEFAULT 0,
+                q2_away     INTEGER DEFAULT 0,
+                q3_home     INTEGER DEFAULT 0,
+                q3_away     INTEGER DEFAULT 0,
+                q4_home     INTEGER DEFAULT 0,
+                q4_away     INTEGER DEFAULT 0,
+                ot_home     INTEGER DEFAULT 0,
+                ot_away     INTEGER DEFAULT 0,
+                updated_at  TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(game_id, game_date)
+            )
+        """)
 
         # ── Causality event log (survives restart/error — feeds self-learning) ─
         cur.execute("""
@@ -3966,6 +3998,13 @@ def _watch_all_live_games():
         away_c = next((t for t in teams if t.get("homeAway") == "away"), {})
         st     = ev.get("status", {})
         state  = st.get("type", {}).get("state", "")   # "pre" / "in" / "post"
+        # Extract per-quarter linescores {1: (h,a), 2: (h,a), ...}
+        _qmap = {}
+        home_ls = home_c.get("linescores", [])
+        away_ls = away_c.get("linescores", [])
+        for _qi, (_hl, _al) in enumerate(zip(home_ls, away_ls), start=1):
+            _qmap[_qi] = (int(_hl.get("value", 0) or 0),
+                          int(_al.get("value", 0) or 0))
         games_data.append({
             "id":        ev.get("id"),
             "status":    state,
@@ -3975,6 +4014,7 @@ def _watch_all_live_games():
             "away_team": away_c.get("team", {}).get("displayName", ""),
             "home_pts":  int(home_c.get("score", 0) or 0),
             "away_pts":  int(away_c.get("score", 0) or 0),
+            "quarters":  _qmap,
         })
 
     if not games_data:
@@ -4077,6 +4117,38 @@ def _watch_all_live_games():
                   actual_total, round(projected_total, 1), period, status))
             conn.commit()
             cur.close()
+
+            # ── Quarter-by-quarter scoring ────────────────────────────────────
+            quarters = g.get("quarters", {})
+            if quarters and (is_live or is_final):
+                try:
+                    qh = {q: quarters[q][0] for q in quarters}
+                    qa = {q: quarters[q][1] for q in quarters}
+                    cur3 = conn.cursor()
+                    cur3.execute("""
+                        INSERT INTO game_quarters
+                            (game_id, game_date, home_team, away_team,
+                             q1_home, q1_away, q2_home, q2_away,
+                             q3_home, q3_away, q4_home, q4_away,
+                             ot_home, ot_away, updated_at)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                        ON CONFLICT (game_id, game_date) DO UPDATE SET
+                            q1_home = EXCLUDED.q1_home, q1_away = EXCLUDED.q1_away,
+                            q2_home = EXCLUDED.q2_home, q2_away = EXCLUDED.q2_away,
+                            q3_home = EXCLUDED.q3_home, q3_away = EXCLUDED.q3_away,
+                            q4_home = EXCLUDED.q4_home, q4_away = EXCLUDED.q4_away,
+                            ot_home = EXCLUDED.ot_home, ot_away = EXCLUDED.ot_away,
+                            updated_at = NOW()
+                    """, (game_id, today, home_team, away_team,
+                          qh.get(1,0), qa.get(1,0),
+                          qh.get(2,0), qa.get(2,0),
+                          qh.get(3,0), qa.get(3,0),
+                          qh.get(4,0), qa.get(4,0),
+                          qh.get(5,0), qa.get(5,0)))
+                    conn.commit()
+                    cur3.close()
+                except Exception as _qe:
+                    print(f"[Observer] quarter score error {game_id}: {_qe}")
 
             # ── Generate shadow picks on tip-off (first live cycle) ──────────
             if is_live and not already_shadowed:
@@ -4184,6 +4256,41 @@ def _watch_all_live_games():
                     except Exception:
                         pass
 
+                    # ── Rest days for this player ────────────────────────────
+                    _rest_days = 1
+                    try:
+                        _rc = conn.cursor()
+                        _rc.execute("""
+                            SELECT game_date FROM player_observations
+                            WHERE player_name = %s AND game_date < %s
+                            ORDER BY game_date DESC LIMIT 1
+                        """, (pname, today))
+                        _rr = _rc.fetchone()
+                        _rc.close()
+                        if _rr:
+                            from datetime import date as _date
+                            _prev = _date.fromisoformat(_rr[0])
+                            _today_d = _date.fromisoformat(today)
+                            _rest_days = max(1, (_today_d - _prev).days)
+                    except Exception:
+                        pass
+
+                    # ── Opponent defensive rating (pts allowed last 10 games) ─
+                    _opp_def = 0.0
+                    try:
+                        _dc = conn.cursor()
+                        _dc.execute("""
+                            SELECT AVG(pts) FROM player_observations
+                            WHERE team = %s AND game_date < %s
+                            ORDER BY game_date DESC LIMIT 100
+                        """, (opponent, today))
+                        _dr = _dc.fetchone()
+                        _dc.close()
+                        if _dr and _dr[0]:
+                            _opp_def = round(float(_dr[0]), 1)
+                    except Exception:
+                        pass
+
                     # ── Upsert player_observations ───────────────────────────
                     cur2 = conn.cursor()
                     cur2.execute("""
@@ -4194,29 +4301,33 @@ def _watch_all_live_games():
                              season_avg_pts, season_avg_ast,
                              season_avg_reb, season_avg_fg3,
                              is_starter, is_benefactor, is_fade,
-                             injury_context, observed_at)
+                             injury_context, rest_days, opp_def_rating,
+                             observed_at)
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                                %s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
                         ON CONFLICT (game_id, player_name, game_date) DO UPDATE SET
-                            minutes      = EXCLUDED.minutes,
-                            pts          = EXCLUDED.pts,
-                            ast          = EXCLUDED.ast,
-                            reb          = EXCLUDED.reb,
-                            fg3m         = EXCLUDED.fg3m,
-                            stl          = EXCLUDED.stl,
-                            blk          = EXCLUDED.blk,
-                            fg_pct       = EXCLUDED.fg_pct,
-                            ft_pct       = EXCLUDED.ft_pct,
-                            is_starter   = EXCLUDED.is_starter,
-                            is_benefactor= EXCLUDED.is_benefactor,
-                            is_fade      = EXCLUDED.is_fade,
+                            minutes        = EXCLUDED.minutes,
+                            pts            = EXCLUDED.pts,
+                            ast            = EXCLUDED.ast,
+                            reb            = EXCLUDED.reb,
+                            fg3m           = EXCLUDED.fg3m,
+                            stl            = EXCLUDED.stl,
+                            blk            = EXCLUDED.blk,
+                            fg_pct         = EXCLUDED.fg_pct,
+                            ft_pct         = EXCLUDED.ft_pct,
+                            is_starter     = EXCLUDED.is_starter,
+                            is_benefactor  = EXCLUDED.is_benefactor,
+                            is_fade        = EXCLUDED.is_fade,
                             injury_context = EXCLUDED.injury_context,
-                            observed_at  = NOW()
+                            rest_days      = EXCLUDED.rest_days,
+                            opp_def_rating = EXCLUDED.opp_def_rating,
+                            observed_at    = NOW()
                     """, (game_id, today, pname, team_name, opponent,
                           round(mins, 1), pts, ast, reb, fg3m, stl, blk,
                           fg_pct, ft_pct, 0,
                           avg_pts, avg_ast, avg_reb, avg_fg3,
-                          is_starter, is_benefactor, is_fade, inj_context))
+                          is_starter, is_benefactor, is_fade, inj_context,
+                          _rest_days, _opp_def))
                     conn.commit()
                     cur2.close()
 
@@ -4355,15 +4466,23 @@ def _cdn_persist_shot_distribution(game_id, game_label):
             try:
                 cur.execute("""
                     UPDATE player_observations
-                    SET fg3a  = %s, fg3m = %s,
-                        rim_a = %s, rim_m = %s,
-                        mid_a = %s, mid_m = %s,
+                    SET fg3a      = %s, fg3m      = %s,
+                        rim_a     = %s, rim_m     = %s,
+                        mid_a     = %s, mid_m     = %s,
+                        turnovers = %s, fta       = %s,
+                        ftm       = %s, pf        = %s,
+                        oreb      = %s, dreb      = %s,
+                        touches   = %s,
                         observed_at = NOW()
                     WHERE player_name = %s
                       AND game_date   = %s
-                """, (s["fg3a"], s["fg3m"],
-                      s["rim_a"], s["rim_m"],
-                      s["mid_a"], s["mid_m"],
+                """, (s["fg3a"],      s["fg3m"],
+                      s["rim_a"],     s["rim_m"],
+                      s["mid_a"],     s["mid_m"],
+                      s["turnovers"], s["fta"],
+                      s["ftm"],       s["pf"],
+                      s["oreb"],      s["dreb"],
+                      s["touches"],
                       pname, today))
             except Exception as _pe:
                 print(f"[CDN] shot persist error {pname}: {_pe}")
@@ -4424,35 +4543,65 @@ def _cdn_live_tracker():
             player = action.get("playerNameI", "").strip()
             if not player:
                 continue
-            shot_type, made = _classify_shot_action(action)
-            if shot_type is None:
-                continue
 
-            # Accumulate into per-game per-player dict
+            atype   = (action.get("actionType") or "").lower()
+            sub     = (action.get("subType")    or "").lower()
+            result  = (action.get("shotResult") or action.get("result") or "").lower()
+
             ps = _cdn_game_player_stats[game_id].setdefault(player, {
                 "pts": 0, "fg3a": 0, "fg3m": 0,
-                "rim_a": 0, "rim_m": 0, "mid_a": 0, "mid_m": 0
+                "rim_a": 0, "rim_m": 0, "mid_a": 0, "mid_m": 0,
+                "turnovers": 0, "fta": 0, "ftm": 0,
+                "pf": 0, "oreb": 0, "dreb": 0, "touches": 0
             })
-            if shot_type == "3PT":
-                ps["fg3a"] += 1
-                if made:
-                    ps["fg3m"] += 1
-                    ps["pts"]  += 3
-            elif shot_type == "LAYUP":
-                ps["rim_a"] += 1
-                if made:
-                    ps["rim_m"] += 1
-                    ps["pts"]   += 2
-            else:   # MID
-                ps["mid_a"] += 1
-                if made:
-                    ps["mid_m"] += 1
-                    ps["pts"]   += 2
 
-            # Hot/cold alert logic (type-specific streaks)
-            alert = _process_cdn_shot(player, shot_type, made, game_label)
-            if alert:
-                game_alerts.append(alert)
+            # ── Shots ──────────────────────────────────────────────────────
+            if atype in ("2pt", "3pt"):
+                shot_type, made = _classify_shot_action(action)
+                if shot_type is not None:
+                    ps["touches"] += 1
+                    if shot_type == "3PT":
+                        ps["fg3a"] += 1
+                        if made:
+                            ps["fg3m"] += 1
+                            ps["pts"]  += 3
+                    elif shot_type == "LAYUP":
+                        ps["rim_a"] += 1
+                        if made:
+                            ps["rim_m"] += 1
+                            ps["pts"]   += 2
+                    else:
+                        ps["mid_a"] += 1
+                        if made:
+                            ps["mid_m"] += 1
+                            ps["pts"]   += 2
+                    alert = _process_cdn_shot(player, shot_type, made, game_label)
+                    if alert:
+                        game_alerts.append(alert)
+
+            # ── Free throws ────────────────────────────────────────────────
+            elif atype == "freethrow":
+                ps["fta"] += 1
+                ps["touches"] += 1
+                if result == "made":
+                    ps["ftm"] += 1
+                    ps["pts"] += 1
+
+            # ── Turnovers ──────────────────────────────────────────────────
+            elif atype == "turnover":
+                ps["turnovers"] += 1
+                ps["touches"]   += 1
+
+            # ── Fouls (non-offensive only) ──────────────────────────────────
+            elif atype == "foul" and sub != "offensive":
+                ps["pf"] += 1
+
+            # ── Rebounds ──────────────────────────────────────────────────
+            elif atype == "rebound":
+                if "offensive" in sub:
+                    ps["oreb"] += 1
+                else:
+                    ps["dreb"] += 1
 
         if game_alerts:
             batch = (
