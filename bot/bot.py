@@ -2333,28 +2333,26 @@ def cmd_forcesettle(chat_id):
             _dcur = _dc.cursor()
             _dcur.execute("""
                 SELECT COUNT(*),
-                       COUNT(*) FILTER (WHERE player IS NULL OR player = ''),
+                       COUNT(*) FILTER (WHERE result IN ('win','loss')),
                        COUNT(*) FILTER (WHERE result = 'void'),
-                       COUNT(*) FILTER (WHERE result IN ('win','loss'))
+                       COUNT(*) FILTER (WHERE result IS NULL OR result = 'pending')
                 FROM bets
-                WHERE pick_category IN ('neutral_prop','fade_prop','benefactor_prop')
             """)
-            _tot, _empty_player, _voided, _graded = _dcur.fetchone()
+            _tot, _graded, _voided, _pending = _dcur.fetchone()
             _dcur.execute("""
-                SELECT player, pick, line, result,
-                       DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York')
+                SELECT COALESCE(NULLIF(player,''), '[game]'), pick, line, result,
+                       DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York'),
+                       pick_category
                 FROM bets
-                WHERE pick_category IN ('neutral_prop','fade_prop','benefactor_prop')
-                  AND (result IS NULL OR result = 'void')
-                  AND player IS NOT NULL AND player != ''
-                ORDER BY id LIMIT 3
+                WHERE (result IS NULL OR result = 'pending')
+                ORDER BY COALESCE(bet_time, created_at) ASC LIMIT 5
             """)
             _sample = _dcur.fetchall()
             _dcur.close()
             _dc.close()
-            diag_lines.append(f"📊 DB: {_tot} prop rows | {_graded} graded | {_voided} void | {_empty_player} empty player")
-            for _sp, _sk, _sl, _sr, _sd in _sample:
-                diag_lines.append(f"  • {_sp} | {_sk} | line={_sl} | {_sr} | {_sd}")
+            diag_lines.append(f"📊 DB: {_tot} total | {_graded} graded | {_voided} void | {_pending} pending")
+            for _sp, _sk, _sl, _sr, _sd, _scat in _sample:
+                diag_lines.append(f"  • {_sp} | {_sk} | line={_sl} | result={_sr} | {_sd} | {_scat}")
     except Exception as _de:
         diag_lines.append(f"⚠️ DB diag error: {_de}")
 
@@ -9428,6 +9426,7 @@ def _update_bet_result_db(game, pick, bet_type, result, actual_value=None, playe
             # same game (e.g. both OVER 22.5 points) settle independently.
             _player_clause = "AND COALESCE(player,'')=%s"
             _player_val    = player or ""
+            _ungraded_clause = "AND (result IS NULL OR result = 'pending')"
             if actual_value is not None:
                 # Also compute and store prediction error so the model can learn
                 cur.execute(
@@ -9437,12 +9436,12 @@ def _update_bet_result_db(game, pick, bet_type, result, actual_value=None, playe
                                WHEN prediction IS NOT NULL THEN prediction - %s
                                ELSE NULL
                            END
-                       WHERE game=%s AND pick=%s AND bet_type=%s {_player_clause} AND result IS NULL""",
+                       WHERE game=%s AND pick=%s AND bet_type=%s {_player_clause} {_ungraded_clause}""",
                     (result, actual_value, actual_value, game, pick, bet_type, _player_val)
                 )
             else:
                 cur.execute(
-                    f"UPDATE bets SET result=%s WHERE game=%s AND pick=%s AND bet_type=%s {_player_clause} AND result IS NULL",
+                    f"UPDATE bets SET result=%s WHERE game=%s AND pick=%s AND bet_type=%s {_player_clause} {_ungraded_clause}",
                     (result, game, pick, bet_type, _player_val)
                 )
             conn.commit()
