@@ -16932,6 +16932,21 @@ def main():
                 # No clock guard — bot detects Final state from live data directly
                 _adj_today = datetime.now(ET).strftime("%Y-%m-%d")
                 if _all_done and _auto_adjust_done_date != _adj_today:
+                    # Run the live observer one final time for the last game
+                    # of the night — the main loop stops calling it once
+                    # _all_done is True, so the very last game's picks would
+                    # otherwise miss live grading.
+                    try:
+                        _watch_all_live_games()
+                    except Exception as _wlg_err:
+                        print(f"[Observer] end-of-night run error: {_wlg_err}")
+                    # Force a full settlement pass immediately so any picks
+                    # the live observer couldn't resolve (e.g. no ESPN box
+                    # score yet) fall back to BDL right away.
+                    try:
+                        update_results()
+                    except Exception as _ur_err:
+                        print(f"[Settlement] end-of-night pass error: {_ur_err}")
                     try:
                         _cleanup_parlay_grades()
                     except Exception as _cpg_err:
