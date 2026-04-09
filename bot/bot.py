@@ -7321,6 +7321,7 @@ def handle_commands():
                             "_ef7_sent_date":           "",
                             "_props_date":              "",
                             "_props_sent":              [],
+                            "_prop_wave_date":          "",
                         })
                         reply(chat_id,
                             "✅ All flags cleared.\n\n"
@@ -14647,9 +14648,15 @@ def _fire_prop_wave():
     except Exception as _by_err:
         print(f"[PropWave] per-game send error: {_by_err}")
 
-    _prop_wave_fired = today_str
-    save_status(0, {"_prop_wave_date": today_str})   # persist — restart-safe, no re-fire
-    print(f"[PropWave] Complete — {len(_todays_parlay_legs)} total legs in pool")
+    # Only mark as fired if odds data was actually available.
+    # If FanDuel hadn't posted lines yet (0 props), leave the guard unset
+    # so the next cycle retries automatically — no picks lost to empty cache.
+    if _props_cache:
+        _prop_wave_fired = today_str
+        save_status(0, {"_prop_wave_date": today_str})
+        print(f"[PropWave] Complete — {len(_todays_parlay_legs)} total legs in pool")
+    else:
+        print(f"[PropWave] ⚠️ No FanDuel odds available yet — guard NOT set, will retry next cycle")
 
 
 def _gs_supported_stats(gs) -> set:
