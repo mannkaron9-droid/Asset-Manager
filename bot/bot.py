@@ -9974,7 +9974,11 @@ def update_results():
                 b["result"] = "win" if actual_total < (b.get("line", 0) or 0) else "loss"
             elif bet_type == "SPREAD":
                 b["result"] = "win" if actual_spread > (b.get("line", 0) or 0) else "loss"
-            elif bet_type in ("VIP_LOCK", "EDGE_FADE", "FADE") or pick_cat == "EDGE_FADE":
+            elif (not b.get("player")   # player props routed to prop block below
+                  and (bet_type in ("VIP_LOCK", "EDGE_FADE", "FADE")
+                       or "edge_fade" in pick_cat.lower().replace("edgefade","edge_fade")
+                       or pick_cat.upper() in ("EDGE_FADE", "EDGEFADE", "EDGEFADE7",
+                                               "VIP_LOCK", "VIPLOCK"))):
                 # Grade by pick content — OVER/UNDER = total, else moneyline
                 pick_str = str(b.get("pick", "")).upper()
                 if "OVER" in pick_str:
@@ -10044,7 +10048,27 @@ def update_results():
     # ELITE_PROP and INDIVIDUAL bets store betType as the category name, not the
     # stat ("points"/"rebounds"/etc.) — _resolve_stat() parses the stat from pick text.
     _PLAYER_PROP_TYPES = {"elite_prop", "individual", "prop", "neutral_prop",
-                          "fade_prop", "benefactor_prop"}
+                          "fade_prop", "benefactor_prop",
+                          # normalised variants stored by different bot versions
+                          "eliteprop", "edgefade", "edgefade7", "viplock",
+                          "individual_bet", "elite_prop_pick"}
+
+    def _cat_matches_prop(b):
+        """Return True if this bet should go through prop settlement."""
+        bt  = b.get("betType",      "").lower()
+        cat = b.get("pick_category","").lower()
+        # normalise: strip underscores/digits so ELITEPROP==elite_prop, EDGEFADE7==edgefade
+        _norm = lambda s: s.replace("_","").replace(" ","").rstrip("1234567890")
+        if bt  in PROP_TYPES:                      return True
+        if bt  in _PLAYER_PROP_TYPES:              return True
+        if cat in _PLAYER_PROP_TYPES:              return True
+        if _norm(bt)  in _PLAYER_PROP_TYPES:       return True
+        if _norm(cat) in _PLAYER_PROP_TYPES:       return True
+        # Last resort: if the bet has a player and the stat is resolvable, grade it
+        if b.get("player") and _resolve_stat(b) is not None:
+            return True
+        return False
+
     # SGP and CROSS_GAME_PARLAY are intentionally excluded here —
     # the live monitor grades them in real-time and _cleanup_parlay_grades()
     # owns end-of-day resolution. Including them here risks partial BDL
@@ -10055,11 +10079,7 @@ def update_results():
         and b.get("player")   # must have a player name to settle
         and b.get("pick_category") not in ("SGP", "CROSS_GAME_PARLAY", "CROSS_SGP")
         and b.get("betType", "").lower() != "first_basket"   # graded by ESPN block
-        and (
-            b.get("betType", "").lower() in PROP_TYPES
-            or b.get("betType", "").lower() in _PLAYER_PROP_TYPES
-            or b.get("pick_category", "").lower() in _PLAYER_PROP_TYPES
-        )
+        and _cat_matches_prop(b)
     ]
     if unsettled_props:
         for d in dates_to_check:
