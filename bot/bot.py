@@ -3200,7 +3200,7 @@ def cmd_update_ml(chat_id):
                 WHERE result IS NULL
                   AND DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York') = %s
                   AND bet_type IN ('ML', 'MONEYLINE', 'TOTAL', 'SPREAD', 'VIP_LOCK')
-                  AND (player IS NULL OR player = '')
+                  AND COALESCE(pick_category, '') NOT IN ('EDGE_FADE', 'SGP', 'CROSS_GAME_PARLAY')
                 ORDER BY id DESC
             """, (today_et,))
             for bid, player, pick_text, line, bet_type in cur.fetchall():
