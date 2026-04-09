@@ -7330,6 +7330,13 @@ def handle_commands():
                             "/schedule — Tonight's NBA games\n"
                             "/subscribe — Join VIP ($29/mo, 7-day trial)\n"
                         ))
+        except (requests.exceptions.ReadTimeout,
+                requests.exceptions.ConnectTimeout,
+                requests.exceptions.ConnectionError) as e:
+            # Normal for long-polling — Telegram held the connection open
+            # and it expired with no updates.  Just resume immediately.
+            print(f"[commands] Network timeout (normal): {e}")
+            continue
         except Exception as e:
             import traceback
             print(f"[commands] Error: {e}\n{traceback.format_exc()}")
