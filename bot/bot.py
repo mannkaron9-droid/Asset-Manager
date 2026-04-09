@@ -9857,21 +9857,44 @@ def update_results():
 
     today     = datetime.now(timezone.utc).date()
     yesterday = today - timedelta(days=1)
-    et_hour   = datetime.now(ET).hour
-    dates_to_check = [str(today)]
-    if et_hour < 8:
-        dates_to_check.insert(0, str(yesterday))
+    today_str = str(today)
 
-    # ── Game data: unified layer (ESPN/CDN/BDL) for today ─────────────────────
+    # ── Build date list from ALL unsettled bets in the DB ─────────────────────
+    # Always include today and yesterday as a base, then add any other dates
+    # that still have pending picks so nothing gets permanently orphaned.
+    dates_to_check = {today_str, str(yesterday)}
+    try:
+        _hc = _db_conn()
+        if _hc:
+            _hcur = _hc.cursor()
+            _hcur.execute("""
+                SELECT DISTINCT DATE(
+                    COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York'
+                )
+                FROM bets
+                WHERE result IS NULL
+            """)
+            for (_d,) in _hcur.fetchall():
+                if _d:
+                    dates_to_check.add(str(_d))
+            _hcur.close()
+            _hc.close()
+    except Exception:
+        pass
+    dates_to_check = sorted(dates_to_check)
+
+    # ── Game data: today from unified layer (ESPN/CDN/BDL) ────────────────────
     # Normalized format: {home_team(str), away_team(str), home_score, away_score,
     #                     status("pre"/"in"/"post")}
     games = list(get_todays_games())  # already normalized
 
-    # For overnight settlement (before 8 AM ET) also pull yesterday from BDL
-    # and normalize it to match the shared format
-    if et_hour < 8:
+    # For every past date with unsettled picks, also pull BDL game results so
+    # game-level ML/spread/total picks can be settled even days later.
+    for _past_date in dates_to_check:
+        if _past_date == today_str:
+            continue  # already fetched above
         try:
-            url = f"{BDL_BASE}/games?dates[]={str(yesterday)}&per_page=20"
+            url = f"{BDL_BASE}/games?dates[]={_past_date}&per_page=20"
             for g in _bdl_get(url).get("data", []):
                 ht = g.get("home_team", {})
                 vt = g.get("visitor_team", {})
