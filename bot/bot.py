@@ -9911,6 +9911,11 @@ def update_results():
     changed = False
     newly_settled = 0
 
+    # ── Helper: treat result='pending' the same as NULL (not yet graded) ──────
+    def _needs_grading(b):
+        r = (b.get("result") or "").lower().strip()
+        return r in ("", "pending")
+
     # ── Load today's causality events once — shared across all settlements ────
     _today_causal_events = []
     try:
@@ -9929,7 +9934,7 @@ def update_results():
         pass
 
     for b in bets:
-        if b.get("result"):
+        if not _needs_grading(b):
             continue
         bet_type  = b.get("betType", "MONEYLINE")
         pick_cat  = b.get("pick_category", "")
@@ -10047,7 +10052,7 @@ def update_results():
     # grading that corrupts the bust-propagation logic.
     unsettled_props = [
         b for b in bets
-        if not b.get("result")
+        if _needs_grading(b)
         and b.get("player")   # must have a player name to settle
         and b.get("pick_category") not in ("SGP", "CROSS_GAME_PARLAY", "CROSS_SGP")
         and b.get("betType", "").lower() != "first_basket"   # graded by ESPN block
@@ -10066,7 +10071,7 @@ def update_results():
                     p = stat.get("player", {})
                     full_name = f"{p.get('first_name','')} {p.get('last_name','')}".strip()
                     for b in unsettled_props:
-                        if b.get("result"):
+                        if not _needs_grading(b):
                             continue
                         if b.get("player", "").lower() != full_name.lower():
                             continue
@@ -10144,7 +10149,7 @@ def update_results():
     # Uses ESPN play-by-play — no BDL call needed, idempotent via result IS NULL
     unsettled_fb = [
         b for b in bets
-        if not b.get("result")
+        if _needs_grading(b)
         and b.get("player")
         and b.get("betType", "").lower() == "first_basket"
     ]
@@ -10181,7 +10186,7 @@ def update_results():
                     continue
 
                 for b in fb_picks:
-                    if b.get("result"):
+                    if not _needs_grading(b):
                         continue
                     picked_player = b.get("player", "")
                     b["result"] = (
@@ -10208,7 +10213,7 @@ def update_results():
     # ── GAME TOTAL SETTLEMENT (CGP game total legs — no player, bet_type TOTAL) ─
     unsettled_totals = [
         b for b in bets
-        if not b.get("result")
+        if _needs_grading(b)
         and b.get("pick_category") == "CROSS_GAME_PARLAY"
         and b.get("betType", "").upper() in ("TOTAL", "OVER", "UNDER")
         and not b.get("player")
