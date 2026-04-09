@@ -4127,6 +4127,56 @@ def _espn_summary_player_stats(event_id):
         return []
 
 
+def _espn_first_scorer(event_id):
+    """
+    Return the display name of the first player to score in the game,
+    using ESPN play-by-play data.  Returns None if unavailable.
+    """
+    try:
+        data = requests.get(
+            f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event={event_id}",
+            timeout=10,
+        ).json()
+        for play in data.get("plays", []):
+            if play.get("scoringPlay"):
+                participants = play.get("participants", [])
+                if participants:
+                    return participants[0].get("athlete", {}).get("displayName", "")
+        return None
+    except Exception as _e:
+        print(f"[FirstBasket] ESPN play-by-play error event {event_id}: {_e}")
+        return None
+
+
+def _espn_event_id_for_game(home_team, away_team, date_str=None):
+    """
+    Look up the ESPN event_id for a game given team names and an optional date.
+    Uses the ESPN scoreboard endpoint.  Returns None if not found.
+    """
+    try:
+        if not date_str:
+            date_str = datetime.now(ET).strftime("%Y%m%d")
+        else:
+            date_str = str(date_str).replace("-", "")
+        resp = requests.get(
+            f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates={date_str}",
+            timeout=10,
+        ).json()
+        for event in resp.get("events", []):
+            comps = event.get("competitions", [{}])[0]
+            teams = [c.get("team", {}).get("displayName", "") for c in comps.get("competitors", [])]
+            home_kw = set(w.lower() for w in home_team.split() if len(w) > 3)
+            away_kw = set(w.lower() for w in away_team.split() if len(w) > 3)
+            name_str = " ".join(teams).lower()
+            if (any(w in name_str for w in home_kw) and
+                    any(w in name_str for w in away_kw)):
+                return event.get("id")
+        return None
+    except Exception as _e:
+        print(f"[FirstBasket] ESPN event lookup error: {_e}")
+        return None
+
+
 def _watch_all_live_games():
     """
     Observe ALL scheduled NBA games live — with or without picks logged.
@@ -5953,19 +6003,40 @@ def _grade_shadow_picks_for_game(game_id, game_date):
         "cgp_safe", "cgp_balanced", "cgp_aggressive",
     }
 
+    # First scorer looked up once per game (lazy, None means not yet fetched)
+    _first_scorer_cache = {}
+
     graded = 0
     for pick_id, pname, stat, line, direction, pick_type in picks:
         actual_val = None
         result     = None
         try:
             _is_prop_like = (pick_type == "prop") or (pick_type in _SGP_CGP_TYPES)
-            if _is_prop_like and pname in stat_map:
-                _stat_key = {
+            if stat == "first_basket" and pname:
+                # Grade using ESPN play-by-play (one call per game)
+                if "first_scorer" not in _first_scorer_cache:
+                    _first_scorer_cache["first_scorer"] = _espn_first_scorer(game_id)
+                first_scorer = _first_scorer_cache["first_scorer"]
+                if first_scorer:
+                    result = "win" if pname.lower() == first_scorer.lower() else "loss"
+                    actual_val = float(0)  # no numeric actual for first basket
+            elif _is_prop_like and pname in stat_map:
+                _sm = stat_map[pname]
+                _STAT_MAP = {
                     "points": "pts", "rebounds": "reb",
                     "assists": "ast", "threes": "fg3m",
                     "pts": "pts", "reb": "reb", "ast": "ast",
-                }.get(stat, stat)
-                actual_val = stat_map[pname].get(_stat_key, 0)
+                }
+                if stat in _STAT_MAP:
+                    actual_val = _sm.get(_STAT_MAP[stat], 0)
+                elif stat == "points_rebounds_assists":
+                    actual_val = (_sm.get("pts") or 0) + (_sm.get("reb") or 0) + (_sm.get("ast") or 0)
+                elif stat == "points_rebounds":
+                    actual_val = (_sm.get("pts") or 0) + (_sm.get("reb") or 0)
+                elif stat == "points_assists":
+                    actual_val = (_sm.get("pts") or 0) + (_sm.get("ast") or 0)
+                else:
+                    actual_val = _sm.get(stat, 0)
                 result = "win" if (
                     (direction == "over" and actual_val > line) or
                     (direction == "under" and actual_val < line)
@@ -9907,20 +9978,33 @@ def update_results():
 
     # ── PLAYER PROP SETTLEMENT (ELITE_PROP, SGP legs, CGP legs) ───────────────
     # Covers any pick with a known stat betType OR with pick_category SGP/CGP
-    PROP_TYPES = {"points", "rebounds", "assists", "threes"}
+    PROP_TYPES = {
+        "points", "rebounds", "assists", "threes",
+        "points_rebounds_assists", "points_rebounds", "points_assists",
+    }
 
     def _resolve_stat(b):
         """Return the stat key for a bet, or None if it can't be determined."""
         bt = b.get("betType", "").lower()
         if bt in PROP_TYPES:
             return bt
+        # combo aliases
+        if bt in ("pra", "points_rebounds_assists"):
+            return "points_rebounds_assists"
+        if bt in ("pr", "points_rebounds"):
+            return "points_rebounds"
+        if bt in ("pa", "points_assists"):
+            return "points_assists"
         # SGP / CGP legs: stat is embedded in the pick text
         pick = str(b.get("pick", "")).lower()
-        for s in ("points", "rebounds", "assists", "threes"):
+        for s in ("points_rebounds_assists", "points_rebounds", "points_assists",
+                  "points", "rebounds", "assists", "threes"):
             if s in pick:
                 return s
         if "3pt" in pick or "three" in pick:
             return "threes"
+        if "pra" in pick:
+            return "points_rebounds_assists"
         return None
 
     # ELITE_PROP and INDIVIDUAL bets store betType as the category name, not the
@@ -9936,6 +10020,7 @@ def update_results():
         if not b.get("result")
         and b.get("player")   # must have a player name to settle
         and b.get("pick_category") not in ("SGP", "CROSS_GAME_PARLAY", "CROSS_SGP")
+        and b.get("betType", "").lower() != "first_basket"   # graded by ESPN block
         and (
             b.get("betType", "").lower() in PROP_TYPES
             or b.get("betType", "").lower() in _PLAYER_PROP_TYPES
@@ -9969,6 +10054,19 @@ def update_results():
                             actual = stat.get("ast", None)
                         elif resolved_stat == "threes":
                             actual = stat.get("fg3m", None)
+                        elif resolved_stat == "points_rebounds_assists":
+                            _p = stat.get("pts") or 0
+                            _r = stat.get("reb") or 0
+                            _a = stat.get("ast") or 0
+                            actual = _p + _r + _a
+                        elif resolved_stat == "points_rebounds":
+                            _p = stat.get("pts") or 0
+                            _r = stat.get("reb") or 0
+                            actual = _p + _r
+                        elif resolved_stat == "points_assists":
+                            _p = stat.get("pts") or 0
+                            _a = stat.get("ast") or 0
+                            actual = _p + _a
                         else:
                             actual = None
                         if actual is None:
@@ -10011,6 +10109,71 @@ def update_results():
                             pass
             except Exception as pe:
                 print(f"Prop settlement error: {pe}")
+
+    # ── FIRST BASKET SETTLEMENT ────────────────────────────────────────────────
+    # Uses ESPN play-by-play — no BDL call needed, idempotent via result IS NULL
+    unsettled_fb = [
+        b for b in bets
+        if not b.get("result")
+        and b.get("player")
+        and b.get("betType", "").lower() == "first_basket"
+    ]
+    if unsettled_fb:
+        # Group picks by game so we only call ESPN once per game
+        _fb_by_game = {}
+        for b in unsettled_fb:
+            _fb_by_game.setdefault(b.get("game", ""), []).append(b)
+
+        for game_name, fb_picks in _fb_by_game.items():
+            try:
+                # Only grade if the game is Final
+                _fb_game_done = False
+                for g in games:
+                    if g.get("status") == "post":
+                        _hn = g.get("home_team", "")
+                        _an = g.get("away_team", "")
+                        if any(w.lower() in game_name.lower() for w in _hn.split() if len(w) > 3):
+                            _fb_game_done = True
+                            break
+                if not _fb_game_done:
+                    continue
+
+                # Resolve ESPN event_id from game name (split on "vs" or "@")
+                _parts = game_name.replace(" @ ", " vs ").split(" vs ")
+                _away_t = _parts[0].strip() if len(_parts) >= 2 else ""
+                _home_t = _parts[1].strip() if len(_parts) >= 2 else game_name
+                _evt_id = _espn_event_id_for_game(_home_t, _away_t)
+                if not _evt_id:
+                    continue
+
+                first_scorer = _espn_first_scorer(_evt_id)
+                if not first_scorer:
+                    continue
+
+                for b in fb_picks:
+                    if b.get("result"):
+                        continue
+                    picked_player = b.get("player", "")
+                    b["result"] = (
+                        "win" if picked_player.lower() == first_scorer.lower() else "loss"
+                    )
+                    b["actual_value"] = first_scorer
+                    _update_bet_result_db(
+                        b.get("game"), b.get("pick"), b.get("betType"),
+                        b["result"], actual_value=None, player=picked_player,
+                    )
+                    changed = True
+                    newly_settled += 1
+                    _notify_pick_result(b)
+                    print(f"[FirstBasket] {picked_player} → {b['result']} (first scorer: {first_scorer})")
+
+                    try:
+                        from decision_engine import record_causality_outcome as _rco
+                        _rco(b["result"], "first_basket", "UNKNOWN", _today_causal_events)
+                    except Exception:
+                        pass
+            except Exception as _fbe:
+                print(f"[FirstBasket] grading error for {game_name}: {_fbe}")
 
     # ── GAME TOTAL SETTLEMENT (CGP game total legs — no player, bet_type TOTAL) ─
     unsettled_totals = [
