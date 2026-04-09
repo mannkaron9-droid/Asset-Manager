@@ -2603,8 +2603,13 @@ def cmd_debugsettle(chat_id):
                 f"betType={btype} | {pcat} | {bdate} | result={result}"
             )
 
-        # Test paginated BDL for ALL dates with pending picks
-        dates_found = sorted({str(r[6]) for r in rows if r[6]})
+        # Test paginated BDL for ALL dates with pending picks.
+        # Also test date-1 for each, because picks created after midnight ET
+        # are stored with tomorrow's date even though the game was yesterday.
+        from datetime import date as _date, timedelta as _td
+        _raw_dates = {str(r[6]) for r in rows if r[6]}
+        _extra = {str(_date.fromisoformat(d) - _td(days=1)) for d in _raw_dates}
+        dates_found = sorted(_raw_dates | _extra)
         pending_names = [r[1].lower() for r in rows if r[1]]
         for test_date in dates_found:
             lines.append(f"\n🌐 BDL test for {test_date}:")
@@ -9951,11 +9956,15 @@ def update_results():
                     COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York'
                 )
                 FROM bets
-                WHERE result IS NULL
+                WHERE result IS NULL OR result = 'pending'
             """)
             for (_d,) in _hcur.fetchall():
                 if _d:
                     dates_to_check.add(str(_d))
+                    # Picks created after midnight ET carry tomorrow's date even though
+                    # the game was the night before — always check the previous day too.
+                    _prev = str(_d - timedelta(days=1))
+                    dates_to_check.add(_prev)
             _hcur.close()
             _hc.close()
     except Exception:
