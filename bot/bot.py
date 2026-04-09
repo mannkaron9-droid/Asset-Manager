@@ -2342,7 +2342,7 @@ def cmd_forcesettle(chat_id):
             _dcur.execute("""
                 SELECT COALESCE(NULLIF(player,''), '[game]'), pick, line, result,
                        DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York'),
-                       pick_category
+                       pick_category, COALESCE(bet_type,'?')
                 FROM bets
                 WHERE (result IS NULL OR result = 'pending')
                 ORDER BY COALESCE(bet_time, created_at) ASC LIMIT 5
@@ -2351,8 +2351,8 @@ def cmd_forcesettle(chat_id):
             _dcur.close()
             _dc.close()
             diag_lines.append(f"📊 DB: {_tot} total | {_graded} graded | {_voided} void | {_pending} pending")
-            for _sp, _sk, _sl, _sr, _sd, _scat in _sample:
-                diag_lines.append(f"  • {_sp} | {_sk} | line={_sl} | result={_sr} | {_sd} | {_scat}")
+            for _sp, _sk, _sl, _sr, _sd, _scat, _sbt in _sample:
+                diag_lines.append(f"  • {_sp} | {_sk} | line={_sl} | betType={_sbt} | result={_sr} | {_sd} | {_scat}")
     except Exception as _de:
         diag_lines.append(f"⚠️ DB diag error: {_de}")
 
@@ -2499,11 +2499,10 @@ def _cleanup_parlay_grades():
 
 def cmd_debugsettle(chat_id):
     """
-    /debugsettle — Admin: show first 5 unsettled neutral_prop rows and
-    test BDL lookup for the most recent date found, so we can diagnose
-    why /forcesettle returns 0.
+    /debugsettle — Admin: show all unsettled player-prop rows (any category)
+    and test paginated BDL lookup for the most recent date found.
     """
-    lines = ["🔍 <b>Debug: unsettled prop rows</b>"]
+    lines = ["🔍 <b>Debug: unsettled prop rows (all categories)</b>"]
     conn = _db_conn()
     if not conn:
         reply(chat_id, "❌ No DB connection.")
@@ -2511,49 +2510,56 @@ def cmd_debugsettle(chat_id):
     try:
         cur = conn.cursor()
         cur.execute("""
-            SELECT id, player, pick, line, pick_category,
+            SELECT id, player, pick, line, pick_category, bet_type,
                    DATE(COALESCE(bet_time, created_at) AT TIME ZONE 'America/New_York'),
                    result
             FROM bets
-            WHERE pick_category IN ('neutral_prop','fade_prop','benefactor_prop')
-            ORDER BY id
-            LIMIT 8
+            WHERE (result IS NULL OR result = 'pending')
+              AND player IS NOT NULL AND player != ''
+              AND pick_category NOT IN ('SGP','CROSS_GAME_PARLAY','CROSS_SGP')
+            ORDER BY COALESCE(bet_time, created_at) ASC
+            LIMIT 10
         """)
         rows = cur.fetchall()
         cur.execute("""
             SELECT COUNT(*) FROM bets
-            WHERE pick_category IN ('neutral_prop','fade_prop','benefactor_prop')
-              AND result IS NULL
+            WHERE (result IS NULL OR result = 'pending')
               AND player IS NOT NULL AND player != ''
         """)
         total_unsettled = cur.fetchone()[0]
         cur.close()
         conn.close()
 
-        lines.append(f"Total unsettled (player not null): <b>{total_unsettled}</b>")
-        lines.append(f"First 8 rows (any result):\n")
-        for rid, player, pick, line, pcat, bdate, result in rows:
+        lines.append(f"Total unsettled player props: <b>{total_unsettled}</b>")
+        lines.append(f"First 10 unsettled rows:\n")
+        for rid, player, pick, ln, pcat, btype, bdate, result in rows:
             lines.append(
-                f"  #{rid} | {player or '(empty)'} | {pick} | line={line} | "
-                f"{pcat} | {bdate} | result={result}"
+                f"  #{rid} | {player or '(empty)'} | {pick} | line={ln} | "
+                f"betType={btype} | {pcat} | {bdate} | result={result}"
             )
 
-        # Now test BDL for the most recent date found
-        dates_found = sorted({str(r[5]) for r in rows if r[5]}, reverse=True)
+        # Test paginated BDL for the most recent date found
+        dates_found = sorted({str(r[6]) for r in rows if r[6]}, reverse=True)
         if dates_found:
             test_date = dates_found[0]
-            lines.append(f"\n🌐 BDL test for {test_date}:")
+            lines.append(f"\n🌐 Paginated BDL test for {test_date}:")
             try:
-                url = f"{BDL_BASE}/stats?dates[]={test_date}&per_page=100"
-                data = _bdl_get(url).get("data", [])
+                _page, _max_pages = 1, 1
                 final_players = []
-                for st in data:
-                    p = st.get("player", {})
-                    nm = f"{p.get('first_name','')} {p.get('last_name','')}".strip()
-                    status = st.get("game", {}).get("status", "")
-                    if "final" in status.lower():
-                        final_players.append(nm)
-                lines.append(f"  {len(final_players)} final-game players from BDL")
+                while _page <= _max_pages and _page <= 5:
+                    _resp = _bdl_get(f"{BDL_BASE}/stats?dates[]={test_date}&per_page=100&page={_page}")
+                    _max_pages = int((_resp.get("meta") or {}).get("total_pages") or 1)
+                    for st in _resp.get("data", []):
+                        p = st.get("player", {})
+                        nm = f"{p.get('first_name','')} {p.get('last_name','')}".strip()
+                        if "final" in (st.get("game", {}).get("status", "")).lower():
+                            final_players.append(nm)
+                    _page += 1
+                lines.append(f"  {len(final_players)} final-game players from BDL ({_max_pages} page(s))")
+                # Show players from the unsettled rows so we can confirm match
+                pending_names = [r[1].lower() for r in rows if r[1]]
+                matched = [nm for nm in final_players if nm.lower() in pending_names]
+                lines.append(f"  Pending players found in BDL: {matched or '(none)'}")
                 lines.append(f"  First 5: {', '.join(final_players[:5]) or '(none)'}")
             except Exception as bdl_e:
                 lines.append(f"  BDL error: {bdl_e}")
@@ -10026,22 +10032,28 @@ def update_results():
         bt = b.get("betType", "").lower()
         if bt in PROP_TYPES:
             return bt
-        # combo aliases
-        if bt in ("pra", "points_rebounds_assists"):
+        # combo aliases — with and without underscores
+        if bt in ("pra", "points_rebounds_assists", "pointsreboundsassists"):
             return "points_rebounds_assists"
-        if bt in ("pr", "points_rebounds"):
+        if bt in ("pr", "points_rebounds", "pointsrebounds"):
             return "points_rebounds"
-        if bt in ("pa", "points_assists"):
+        if bt in ("pa", "points_assists", "pointsassists"):
             return "points_assists"
-        # SGP / CGP legs: stat is embedded in the pick text
-        pick = str(b.get("pick", "")).lower()
+        # SGP / CGP legs: stat is embedded in the pick text.
+        # Normalise the pick to the underscore form first so that
+        # "pointsreboundsassists" (no underscores) also matches.
+        pick_raw = str(b.get("pick", "")).lower()
+        pick_norm = (pick_raw
+                     .replace("pointsreboundsassists", "points_rebounds_assists")
+                     .replace("pointsrebounds",        "points_rebounds")
+                     .replace("pointsassists",         "points_assists"))
         for s in ("points_rebounds_assists", "points_rebounds", "points_assists",
                   "points", "rebounds", "assists", "threes"):
-            if s in pick:
+            if s in pick_norm:
                 return s
-        if "3pt" in pick or "three" in pick:
+        if "3pt" in pick_norm or "three" in pick_norm:
             return "threes"
-        if "pra" in pick:
+        if "pra" in pick_norm:
             return "points_rebounds_assists"
         return None
 
@@ -10084,8 +10096,16 @@ def update_results():
     if unsettled_props:
         for d in dates_to_check:
             try:
-                url = f"{BDL_BASE}/stats?dates[]={d}&per_page=100"
-                stats_data = _bdl_get(url).get("data", [])
+                # Paginate through all BDL pages — a full game day has 140+ rows,
+                # so a single per_page=100 call misses late-alphabet players.
+                _page, _max_pages = 1, 1
+                stats_data = []
+                while _page <= _max_pages and _page <= 5:
+                    _resp = _bdl_get(f"{BDL_BASE}/stats?dates[]={d}&per_page=100&page={_page}")
+                    stats_data.extend(_resp.get("data", []))
+                    _max_pages = int((_resp.get("meta") or {}).get("total_pages") or 1)
+                    _page += 1
+                print(f"[PropSettle] {d}: {len(stats_data)} player rows from BDL ({_max_pages} page(s))")
                 for stat in stats_data:
                     p = stat.get("player", {})
                     full_name = f"{p.get('first_name','')} {p.get('last_name','')}".strip()
