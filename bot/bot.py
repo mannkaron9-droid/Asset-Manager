@@ -9233,14 +9233,15 @@ _PROP_STD = {
 
 def save_bet(bet):
     # ── Pattern gate — holds picks when context pattern is weak ───────────────
+    # EDGE_FADE / VIP_LOCK / SGP / CGP are already vetted by their own engines —
+    # never block them from saving. Still apply confidence writeback for learning.
+    _GATE_EXEMPT = {"EDGE_FADE", "VIP_LOCK", "SGP", "CROSS_GAME_PARLAY"}
+    _is_exempt   = bet.get("pick_category") in _GATE_EXEMPT
     try:
         from bot.decision_engine import gate_pick as _gate_pick, evaluate_pick as _eval_pick
-        if not _gate_pick(bet):
+        if not _is_exempt and not _gate_pick(bet):
             return False   # PASS decision — don't save or send
-        # Write the pattern-adjusted confidence back onto the bet so the stored
-        # record and future learning cycles use the corrected value, not the raw
-        # model output.  evaluate_pick() was already called inside gate_pick —
-        # calling it once more is cheap; patterns are already in memory.
+        # Write the pattern-adjusted confidence back regardless — used for learning.
         try:
             _adj_conf, _ = _eval_pick(bet)
             if _adj_conf is not None:
