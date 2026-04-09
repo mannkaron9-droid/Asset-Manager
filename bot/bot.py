@@ -4619,6 +4619,81 @@ def _watch_all_live_games():
                     conn.commit()
                     cur2.close()
 
+                    # ── Live prop settlement ─────────────────────────────────
+                    # Game just went Final: use the stats we already have to
+                    # grade any pending ELITEPROP / EDGEFADE7 / prop picks for
+                    # this player right now — no BDL call, no pagination issues.
+                    if is_final:
+                        try:
+                            _sc = conn.cursor()
+                            _sc.execute("""
+                                SELECT id, pick, bet_type, line, game
+                                FROM bets
+                                WHERE (result IS NULL OR result = 'pending')
+                                  AND LOWER(COALESCE(player,'')) = LOWER(%s)
+                                  AND pick_category NOT IN
+                                      ('SGP','CROSS_GAME_PARLAY','CROSS_SGP')
+                                  AND LOWER(COALESCE(bet_type,'')) != 'first_basket'
+                            """, (pname,))
+                            _pending = _sc.fetchall()
+                            _sc.close()
+                            for _bid, _bpick, _btype, _bline, _bgame in _pending:
+                                _bt  = (_btype  or "").lower()
+                                _pk  = (_bpick  or "").lower()
+                                # Normalise combo names (no underscores variant)
+                                _pkn = (_pk
+                                        .replace("pointsreboundsassists",
+                                                 "points_rebounds_assists")
+                                        .replace("pointsrebounds",
+                                                 "points_rebounds")
+                                        .replace("pointsassists",
+                                                 "points_assists"))
+                                # Resolve stat — most specific first
+                                if (_bt in ("pra","points_rebounds_assists",
+                                            "pointsreboundsassists")
+                                        or "points_rebounds_assists" in _pkn):
+                                    _actual = pts + reb + ast
+                                elif (_bt in ("pr","points_rebounds",
+                                              "pointsrebounds")
+                                        or "points_rebounds" in _pkn):
+                                    _actual = pts + reb
+                                elif (_bt in ("pa","points_assists",
+                                              "pointsassists")
+                                        or "points_assists" in _pkn):
+                                    _actual = pts + ast
+                                elif (_bt == "points"
+                                        or ("points" in _pkn
+                                            and "rebounds" not in _pkn
+                                            and "assists"  not in _pkn)):
+                                    _actual = pts
+                                elif _bt == "rebounds" or "rebounds" in _pkn:
+                                    _actual = reb
+                                elif _bt == "assists" or "assists" in _pkn:
+                                    _actual = ast
+                                elif (_bt in ("threes","fg3m")
+                                        or "threes" in _pkn
+                                        or "3pt"    in _pkn):
+                                    _actual = fg3m
+                                else:
+                                    continue   # can't resolve — skip
+                                _line_f  = float(_bline or 0)
+                                _dir     = ("OVER" if "OVER" in
+                                            (_bpick or "").upper() else "UNDER")
+                                _res     = ("win"
+                                            if (_dir == "OVER"
+                                                and _actual > _line_f)
+                                            or  (_dir == "UNDER"
+                                                and _actual < _line_f)
+                                            else "loss")
+                                _update_bet_result_db(
+                                    _bgame, _bpick, _btype, _res,
+                                    actual_value=_actual, player=pname)
+                                print(f"[Observer] ✅ Graded #{_bid} "
+                                      f"{pname} | {_bpick} | "
+                                      f"actual={_actual} → {_res}")
+                        except Exception as _se:
+                            print(f"[Observer] settle error {pname}: {_se}")
+
                 except Exception as pe:
                     print(f"[Observer] player row error: {pe}")
 
