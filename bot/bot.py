@@ -1191,6 +1191,71 @@ def cmd_void_pending(chat_id: int, date_str: str = ""):
             pass
 
 
+def cmd_manualgrade(chat_id: int, args: str):
+    """
+    /manualgrade <id> <win|loss|void> [actual_value]
+    Admin: directly set the result for a specific bet by its DB row id.
+    Example: /manualgrade 268 win 6
+             /manualgrade 269 loss
+    """
+    parts = args.split()
+    if len(parts) < 2:
+        reply(chat_id,
+              "Usage: /manualgrade <id> <win|loss|void> [actual_value]\n"
+              "Example: /manualgrade 268 win 6")
+        return
+    try:
+        row_id = int(parts[0])
+    except ValueError:
+        reply(chat_id, "❌ ID must be an integer.")
+        return
+    result_val = parts[1].lower()
+    if result_val not in ("win", "loss", "void"):
+        reply(chat_id, "❌ Result must be win, loss, or void.")
+        return
+    actual_val = None
+    if len(parts) >= 3:
+        try:
+            actual_val = float(parts[2])
+        except ValueError:
+            pass
+    conn = _db_conn()
+    if not conn:
+        reply(chat_id, "❌ No DB connection.")
+        return
+    try:
+        cur = conn.cursor()
+        # First fetch the row so we can show the user what they graded
+        cur.execute("SELECT player, pick, line, pick_category FROM bets WHERE id=%s", (row_id,))
+        row = cur.fetchone()
+        if not row:
+            reply(chat_id, f"❌ No bet found with id={row_id}.")
+            cur.close(); conn.close()
+            return
+        player, pick, line, pcat = row
+        if actual_val is not None:
+            cur.execute(
+                """UPDATE bets SET result=%s, actual_value=%s,
+                       prediction_error = CASE WHEN prediction IS NOT NULL
+                                          THEN prediction - %s ELSE NULL END
+                   WHERE id=%s""",
+                (result_val, actual_val, actual_val, row_id)
+            )
+        else:
+            cur.execute("UPDATE bets SET result=%s WHERE id=%s", (result_val, row_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+        av_str = f" | actual={actual_val}" if actual_val is not None else ""
+        reply(chat_id,
+              f"✅ #{row_id} graded *{result_val.upper()}*\n"
+              f"{player} | {pick} | line={line} | {pcat}{av_str}")
+    except Exception as e:
+        reply(chat_id, f"⚠️ Error: {e}")
+        try: conn.rollback(); conn.close()
+        except Exception: pass
+
+
 def cmd_calibrate(chat_id: int):
     """
     /calibrate — fetches live ESPN season stats for all 30 teams, recomputes
@@ -2538,29 +2603,34 @@ def cmd_debugsettle(chat_id):
                 f"betType={btype} | {pcat} | {bdate} | result={result}"
             )
 
-        # Test paginated BDL for the most recent date found
-        dates_found = sorted({str(r[6]) for r in rows if r[6]}, reverse=True)
-        if dates_found:
-            test_date = dates_found[0]
-            lines.append(f"\n🌐 Paginated BDL test for {test_date}:")
+        # Test paginated BDL for ALL dates with pending picks
+        dates_found = sorted({str(r[6]) for r in rows if r[6]})
+        pending_names = [r[1].lower() for r in rows if r[1]]
+        for test_date in dates_found:
+            lines.append(f"\n🌐 BDL test for {test_date}:")
             try:
                 _page, _max_pages = 1, 1
                 final_players = []
+                all_stats = []
                 while _page <= _max_pages and _page <= 5:
                     _resp = _bdl_get(f"{BDL_BASE}/stats?dates[]={test_date}&per_page=100&page={_page}")
                     _max_pages = int((_resp.get("meta") or {}).get("total_pages") or 1)
                     for st in _resp.get("data", []):
                         p = st.get("player", {})
                         nm = f"{p.get('first_name','')} {p.get('last_name','')}".strip()
+                        all_stats.append(nm)
                         if "final" in (st.get("game", {}).get("status", "")).lower():
-                            final_players.append(nm)
+                            final_players.append((nm, st.get("pts"), st.get("reb"), st.get("ast")))
                     _page += 1
-                lines.append(f"  {len(final_players)} final-game players from BDL ({_max_pages} page(s))")
-                # Show players from the unsettled rows so we can confirm match
-                pending_names = [r[1].lower() for r in rows if r[1]]
-                matched = [nm for nm in final_players if nm.lower() in pending_names]
-                lines.append(f"  Pending players found in BDL: {matched or '(none)'}")
-                lines.append(f"  First 5: {', '.join(final_players[:5]) or '(none)'}")
+                lines.append(f"  Total rows: {len(all_stats)} | Final rows: {len(final_players)} | Pages: {_max_pages}")
+                matched = [(nm, pts, reb, ast) for nm, pts, reb, ast in final_players
+                           if nm.lower() in pending_names]
+                if matched:
+                    for nm, pts, reb, ast in matched:
+                        lines.append(f"  ✅ MATCH: {nm} | pts={pts} reb={reb} ast={ast}")
+                else:
+                    lines.append(f"  ❌ No pending players found in BDL final rows")
+                    lines.append(f"  Sample BDL names: {', '.join(nm for nm, *_ in final_players[:6]) or '(none)'}")
             except Exception as bdl_e:
                 lines.append(f"  BDL error: {bdl_e}")
     except Exception as e:
@@ -7277,6 +7347,10 @@ def handle_commands():
                 elif text.startswith("/debugsettle") and str(chat_id) == str(ADMIN_ID):
                     cmd_debugsettle(chat_id)
                 elif text.startswith("/debugsettle") and str(chat_id) != str(ADMIN_ID):
+                    reply(chat_id, "❌ Admin only.")
+                elif text.startswith("/manualgrade") and str(chat_id) == str(ADMIN_ID):
+                    cmd_manualgrade(chat_id, text[12:].strip())
+                elif text.startswith("/manualgrade") and str(chat_id) != str(ADMIN_ID):
                     reply(chat_id, "❌ Admin only.")
                 elif text.startswith("/settle") and str(chat_id) == str(ADMIN_ID):
                     raw_arg = text[7:].strip()
