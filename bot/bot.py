@@ -5438,6 +5438,20 @@ def _generate_shadow_picks(game_id, home_team, away_team, game_date):
         gs_obj = None
 
     _mults   = _load_conf_multipliers()
+
+    # Load shadow hit rates + win rate context so L6 mirrors run_full_system
+    _shd_shadow_rates = {}
+    try:
+        _shd_shadow_rates = _load_shadow_hit_rates()
+    except Exception:
+        pass
+
+    _shd_wr_ctx = {}
+    try:
+        _shd_wr_ctx = _load_win_rate_context()
+    except Exception:
+        pass
+
     conn     = _db_conn()
     if not conn:
         return
@@ -5573,6 +5587,26 @@ def _generate_shadow_picks(game_id, home_team, away_team, game_date):
                         blocked_by = "L4_SCRIPT_MISMATCH"
                     elif role_tag == "floor_general" and _is_highscr and prop_type == "assists":
                         blocked_by = "L4_SCRIPT_MISMATCH"
+                except Exception:
+                    pass
+
+            # ── L6: shadow hit rate + win rate context ────────────────────────
+            # Mirrors the same gate run_full_pipeline applies (Layer 6)
+            if blocked_by is None and _shd_shadow_rates:
+                try:
+                    _shd_sh_key = f"{pname.lower()}:{prop_type.lower()}"
+                    _shd_sh = _shd_shadow_rates.get(_shd_sh_key, {})
+                    if _shd_sh and _shd_sh.get("total", 0) >= 10 and _shd_sh.get("rate", 1.0) <= 0.35:
+                        blocked_by = "L6_SHADOW_RATE_LOW"
+                except Exception:
+                    pass
+
+            if blocked_by is None and _shd_wr_ctx:
+                try:
+                    _shd_wr_key = pname.lower()
+                    _shd_wr = _shd_wr_ctx.get(_shd_wr_key, {})
+                    if _shd_wr and _shd_wr.get("sample", 0) >= 10 and _shd_wr.get("win_rate", 1.0) <= 0.30:
+                        blocked_by = "L6_WIN_RATE_LOW"
                 except Exception:
                     pass
 
@@ -9659,6 +9693,22 @@ def _update_bet_result_db(game, pick, bet_type, result, actual_value=None, playe
                 )
             conn.commit()
             cur.close()
+            # ── Update self-learning channel floor + Kelly fraction ────────
+            # record_channel_outcome / record_kelly_outcome live in
+            # decision_engine and keep the in-session VIP floor and Kelly
+            # fraction calibrated.  Must fire on every auto-grade, not just
+            # manual cmd_settle, so the feedback loop is never bypassed.
+            if result in ("win", "loss"):
+                try:
+                    from bot.decision_engine import (
+                        record_channel_outcome as _rco,
+                        record_kelly_outcome   as _rko,
+                    )
+                    _grade_hit = (result == "win")
+                    _rco("VIP", _grade_hit)
+                    _rko(1.0 if _grade_hit else -1.0)
+                except Exception as _re:
+                    print(f"[DB] record_outcome skipped: {_re}")
             # ── After settling a result, recompute adaptive thresholds ────
             try:
                 from bot.adaptive_thresholds import run_adaptive_update
@@ -12900,6 +12950,12 @@ def run_full_system():
         all_picks = []
 
         # ── Load learning signals once before processing all games ──────────────
+        # Apply learned team styles so game script uses real pace/off data
+        try:
+            _load_and_apply_team_styles()
+        except Exception as _e:
+            print(f"[EliteProp] Team styles skipped: {_e}")
+
         try:
             _ep_shadow_rates = _load_shadow_hit_rates()
             print(f"[EliteProp] Shadow hit rates: {len(_ep_shadow_rates)} entries")
@@ -13120,6 +13176,14 @@ def run_full_system():
                         if _ep_gs is None:
                             continue   # L1 hard block: no valid game script
 
+                        # Shot status — same call as slip_builder uses (L8 input)
+                        _ep_shot_st, _ep_shot_det = "NEUTRAL", ""
+                        try:
+                            from bot.shot_state import get_shot_status as _gss_ep
+                            _ep_shot_st, _ep_shot_det = _gss_ep(player)
+                        except Exception:
+                            pass
+
                         # ── Route through the full 11-layer engine ───────────────
                         from decision_engine import run_full_pipeline as _rfp_ep
                         _ep_leg = _rfp_ep(
@@ -13144,6 +13208,8 @@ def run_full_system():
                             back_to_back     = _ep_is_b2b,
                             target_channel   = "VIP",
                             is_shadow        = False,
+                            shot_status      = _ep_shot_st,
+                            shot_detail      = _ep_shot_det,
                         )
 
                         if _ep_leg is not None:
