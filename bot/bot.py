@@ -1067,9 +1067,13 @@ def cmd_check_pending(chat_id: int):
                 bet_time::date AS day,
                 COUNT(*)       AS cnt,
                 array_agg(
-                    COALESCE(NULLIF(TRIM(player), ''), '[no player]')
+                    COALESCE(
+                        NULLIF(TRIM(REPLACE(REPLACE(player, 'None', ''), 'none', '')), ''),
+                        '[' || COALESCE(NULLIF(TRIM(bet_type),''), 'pick') || ']'
+                    )
                     || ' ' || pick
                     || ' @ ' || line::text
+                    || ' (' || COALESCE(NULLIF(TRIM(bet_type),''), '?') || ')'
                     ORDER BY bet_time
                 ) AS picks
             FROM bets
