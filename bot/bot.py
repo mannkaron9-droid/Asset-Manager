@@ -9693,22 +9693,6 @@ def _update_bet_result_db(game, pick, bet_type, result, actual_value=None, playe
                 )
             conn.commit()
             cur.close()
-            # ── Update self-learning channel floor + Kelly fraction ────────
-            # record_channel_outcome / record_kelly_outcome live in
-            # decision_engine and keep the in-session VIP floor and Kelly
-            # fraction calibrated.  Must fire on every auto-grade, not just
-            # manual cmd_settle, so the feedback loop is never bypassed.
-            if result in ("win", "loss"):
-                try:
-                    from bot.decision_engine import (
-                        record_channel_outcome as _rco,
-                        record_kelly_outcome   as _rko,
-                    )
-                    _grade_hit = (result == "win")
-                    _rco("VIP", _grade_hit)
-                    _rko(1.0 if _grade_hit else -1.0)
-                except Exception as _re:
-                    print(f"[DB] record_outcome skipped: {_re}")
             # ── After settling a result, recompute adaptive thresholds ────
             try:
                 from bot.adaptive_thresholds import run_adaptive_update
