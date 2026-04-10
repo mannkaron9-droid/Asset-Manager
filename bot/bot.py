@@ -4109,24 +4109,50 @@ def _live_pick_tracker():
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _get_predicted_script(home_team, away_team):
-    """Look up pre-game pace prediction from TEAM_STYLES numeric pace values."""
+    """
+    Full 5-dimension pre-game script label using Vegas total + spread from
+    _games_data (populated by the odds fetch), falling back to TEAM_STYLES
+    pace proxy when odds haven't been loaded yet.
+    Returns the GameScript.label string, e.g. 'COMPETITIVE_HIGH_SCORING'.
+    """
     try:
-        from bot.game_script import TEAM_STYLES, classify_pace
-        h_pace = TEAM_STYLES.get(home_team, {}).get("pace", 100)
-        a_pace = TEAM_STYLES.get(away_team, {}).get("pace", 100)
-        avg_pace_total = (float(h_pace) + float(a_pace)) * 2.2  # rough total proxy
-        return classify_pace(avg_pace_total)
+        from bot.game_script import analyze_game_script, TEAM_STYLES, classify_pace
+        game_key = f"{away_team} @ {home_team}"
+        gd = _games_data.get(game_key, {})
+        total  = float(gd.get("total",  0) or 0)
+        spread = float(gd.get("spread", 0) or 0)
+        if total <= 0:
+            # Fallback: estimate total from TEAM_STYLES pace values
+            h_pace = TEAM_STYLES.get(home_team, {}).get("pace", 100)
+            a_pace = TEAM_STYLES.get(away_team, {}).get("pace", 100)
+            total  = (float(h_pace) + float(a_pace)) * 2.2
+        if spread <= 0:
+            spread = 4.0   # neutral competitive default
+        gs = analyze_game_script(home_team, away_team, total, spread, game_key)
+        return gs.label
     except Exception:
-        return "AVERAGE_PACE"
+        return "COMPETITIVE_NORMAL_SCORING"
 
 
-def _classify_actual_script(projected_total):
-    """Classify actual game script from projected final total."""
+def _classify_actual_script(home_team, away_team, projected_total, live_score_diff):
+    """
+    Full 5-dimension live script label.
+    Uses projected_total for pace + scoring dimensions and the live
+    score differential as the flow spread (same thresholds as pre-game).
+    Offense/defense dimensions come from TEAM_STYLES (static team profiles).
+    Returns the GameScript.label string, e.g. 'BLOWOUT_HIGH_SCORING'.
+    """
     try:
-        from bot.game_script import classify_pace, classify_scoring
-        return f"{classify_pace(projected_total)}_{classify_scoring(projected_total)}"
+        from bot.game_script import analyze_game_script
+        gs = analyze_game_script(
+            home_team, away_team,
+            projected_total,
+            abs(live_score_diff),
+            f"{away_team} @ {home_team}",
+        )
+        return gs.label
     except Exception:
-        return "AVERAGE_PACE_NORMAL_SCORING"
+        return "COMPETITIVE_NORMAL_SCORING"
 
 
 def _parse_bdl_min(min_str):
@@ -4379,9 +4405,12 @@ def _watch_all_live_games():
             elapsed        = _minutes_elapsed(period, time_str) if is_live else 48.0
             projected_total = (actual_total / elapsed * 48) if elapsed > 0 else 0.0
 
+            live_score_diff  = home_pts - away_pts
             predicted_script = _get_predicted_script(home_team, away_team)
             actual_script    = _classify_actual_script(
-                actual_total if is_final else projected_total
+                home_team, away_team,
+                actual_total if is_final else projected_total,
+                live_score_diff,
             )
             script_match = (predicted_script == actual_script)
 
@@ -5399,10 +5428,12 @@ def _generate_shadow_picks(game_id, home_team, away_team, game_date):
     off_avg    = (h_style.get("off_rating", 112) + a_style.get("off_rating", 112)) / 2
     def_avg    = (h_style.get("def_strength", 68) + a_style.get("def_strength", 68)) / 2
     pred_total = max(195.0, min(240.0, off_avg * 2 - def_avg))
-    gs_label   = _classify_actual_script(pred_total)
+    _shd_game_key = f"{away_team} @ {home_team}"
+    _shd_spread   = float((_games_data.get(_shd_game_key) or {}).get("spread", 5.0) or 5.0)
+    gs_label   = _classify_actual_script(home_team, away_team, pred_total, _shd_spread)
 
     try:
-        gs_obj = _ags_shd(home_team, away_team, pred_total, 5)
+        gs_obj = _ags_shd(home_team, away_team, pred_total, _shd_spread)
     except Exception:
         gs_obj = None
 
