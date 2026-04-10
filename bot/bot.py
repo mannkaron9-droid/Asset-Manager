@@ -14346,12 +14346,22 @@ def run():
 
                 for (_bg, _bpick, _btype, _bodds, _bprob,
                      _bconf, _bscript, _btotal, _bspread) in _bf_rows:
-                    # Match bet game name to _full_card key
-                    _fc_key = next(
-                        (k for k in _full_card if k == _bg or
-                         _bg.split(" vs ")[0] in k or _bg.split(" vs ")[-1] in k),
-                        None
-                    )
+                    # Match bet game name to _full_card key.
+                    # Require BOTH teams to appear in the key (short last-word form)
+                    # so a Rockets bet can never accidentally land in the Pacers entry.
+                    _fc_key = None
+                    _bg_norm = _bg.replace(" @ ", " vs ") if _bg else ""
+                    _bg_parts = [p.strip() for p in _bg_norm.split(" vs ")]
+                    for _ck in _full_card:
+                        if _ck == _bg:          # exact match first
+                            _fc_key = _ck
+                            break
+                        if len(_bg_parts) == 2:
+                            _t1 = _bg_parts[0].split()[-1]
+                            _t2 = _bg_parts[1].split()[-1]
+                            if _t1 and _t2 and _t1 in _ck and _t2 in _ck:
+                                _fc_key = _ck
+                                break
                     if not _fc_key:
                         continue
                     entry = _full_card[_fc_key]
@@ -14374,8 +14384,10 @@ def run():
                             "sharp":  "",
                         }
                     elif _btype == "SPREAD" and not entry.get("spread"):
+                        # _bpick is stored as "Team Name SPREAD +5.5" — extract team only
+                        _cover_name = _bpick.split(" SPREAD ")[0].strip() if " SPREAD " in (_bpick or "") else (_bpick or "")
                         entry["spread"] = {
-                            "cover_team":  _bpick,
+                            "cover_team":  _cover_name,
                             "spread_str":  f"{_bspread:+.1f}" if _bspread else "",
                             "opp_spread":  "",
                             "edge":        "",
