@@ -8816,12 +8816,13 @@ def _check_odds_quota(resp):
         if remaining < 0:
             return
         print(f"[Odds API] Quota — {remaining} remaining ({used} used)")
-        _save_quota_state(remaining)   # persist so restarts know the count
         today = datetime.now().strftime("%Y-%m-%d")
+        _new_alert = False
         for threshold in [200, 100, 50, 10, 5]:
             key = f"{threshold}:{today}"
             if remaining <= threshold and key not in _odds_quota_alerted:
                 _odds_quota_alerted.add(key)
+                _new_alert = True
                 msg = (
                     f"⚠️ *Odds API Quota Warning*\n\n"
                     f"Only *{remaining}* requests remaining this month.\n"
@@ -8835,6 +8836,9 @@ def _check_odds_quota(resp):
                     )
                 send(msg, ADMIN_ID)
                 break
+        # Always persist remaining count; if a new alert fired, also save the
+        # updated alerted set so Railway restarts won't re-send the same warning.
+        _save_quota_state(remaining)
     except Exception:
         pass
 
@@ -9145,9 +9149,9 @@ def _api_key_fingerprint() -> str:
 
 
 def _load_quota_state():
-    """Load persisted quota count from DB.
+    """Load persisted quota count + alerted set from DB.
     If the API key has changed since last save, reset quota to 500 automatically."""
-    global _odds_quota_remaining
+    global _odds_quota_remaining, _odds_quota_alerted
     try:
         data = _db_load_cache("odds_quota_state")
         if data:
@@ -9156,11 +9160,19 @@ def _load_quota_state():
             if saved_fp and current_fp and saved_fp != current_fp:
                 # Key changed — user renewed/swapped their Odds API key
                 _odds_quota_remaining = 500
+                _odds_quota_alerted   = set()
                 _save_quota_state(500)
                 print(f"[Quota] API key changed — quota auto-reset to 500")
             else:
                 _odds_quota_remaining = int(data.get("remaining", 999))
-                print(f"[Quota] Loaded from DB: {_odds_quota_remaining} remaining")
+                # Restore alerted set — prevents duplicate warnings after restarts
+                today = datetime.now().strftime("%Y-%m-%d")
+                _odds_quota_alerted = {
+                    k for k in data.get("alerted", [])
+                    if k.endswith(f":{today}")   # only keep today's entries
+                }
+                print(f"[Quota] Loaded from DB: {_odds_quota_remaining} remaining, "
+                      f"{len(_odds_quota_alerted)} alert(s) already sent today")
         else:
             print("[Quota] No DB entry yet — defaulting to 999")
     except Exception as e:
@@ -9168,13 +9180,14 @@ def _load_quota_state():
 
 
 def _save_quota_state(remaining: int):
-    """Persist quota count + current key fingerprint to DB."""
+    """Persist quota count + alerted set + key fingerprint to DB."""
     global _odds_quota_remaining
     _odds_quota_remaining = remaining
     _db_upsert_cache("odds_quota_state", {
-        "remaining": remaining,
+        "remaining":  remaining,
         "api_key_fp": _api_key_fingerprint(),
-        "updated": str(datetime.now())
+        "alerted":    list(_odds_quota_alerted),
+        "updated":    str(datetime.now())
     })
 
 
