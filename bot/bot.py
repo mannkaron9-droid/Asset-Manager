@@ -10764,10 +10764,22 @@ def send_results_recap():
         if hasattr(t, "strftime"):
             return t.strftime("%Y-%m-%d")
         return str(t)[:10]
-    settled_recent = [
+    _raw_recent = [
         b for b in bets
         if b.get("result") and _bet_date_str(b) >= cutoff
     ]
+    # Deduplicate — same pick saved as standalone AND parlay leg shows up twice.
+    # Key: (player, pick, game). Keep highest-confidence copy.
+    _seen_keys: dict = {}
+    for b in sorted(_raw_recent, key=lambda x: x.get("confidence", 0), reverse=True):
+        _dk = (
+            (b.get("player") or "").strip().lower(),
+            (b.get("pick")   or "").strip().lower(),
+            (b.get("game")   or "").strip().lower(),
+        )
+        if _dk not in _seen_keys:
+            _seen_keys[_dk] = b
+    settled_recent = list(_seen_keys.values())
     if not settled_recent:
         return
 
