@@ -13086,150 +13086,93 @@ def run_full_system():
                             )
                         )
 
-                        # ── Apply learning signals to confidence ─────────────────
-                        _p_team_ep = str(stats.get("team", "")).lower()
+                        # ── Build inputs for full 11-layer pipeline ──────────────
+                        import math as _ep_math
+                        _ep_odds    = float(prop.get("odds", -110))
+                        _p_team_ep  = str(stats.get("team", "")).lower()
 
-                        # B2B fatigue penalty (-8 conf for road-night players)
-                        if _ep_b2b and any(kw in _p_team_ep for kw in _ep_b2b):
-                            confidence = max(0, confidence - 8)
-                            print(f"  [EliteProp] {player} B2B fatigue: conf→{confidence}")
+                        # Real per-player std dev (same formula as slip_builder L3)
+                        _ep_real_std = float(np.std(stat_vals)) if len(stat_vals) >= 5 else _PROP_STD.get(prop_type, 5.0)
 
-                        # Shadow hit rate adjustment (5–9 samples → edge bonus/penalty)
-                        _ep_sh_key = f"{player.lower()}:{prop_type.lower()}"
-                        _ep_sh     = _ep_shadow_rates.get(_ep_sh_key, {})
-                        if _ep_sh and 5 <= _ep_sh.get("total", 0) < 10:
-                            _ep_sh_rate = _ep_sh["rate"]
-                            _ep_sh_adj  = (5  if _ep_sh_rate >= 0.65 else
-                                           2  if _ep_sh_rate >= 0.55 else
-                                          -6  if _ep_sh_rate <= 0.35 else
-                                          -3  if _ep_sh_rate <= 0.45 else 0)
-                            if _ep_sh_adj:
-                                confidence = max(0, confidence + _ep_sh_adj)
-                                print(f"  [EliteProp] {player} shadow ({_ep_sh_rate:.0%} n={_ep_sh['total']}): {_ep_sh_adj:+d} conf→{confidence}")
+                        # L3: ML probability via sigmoid of z-score (matches slip_builder exactly)
+                        _ep_z = (prediction - line) / _ep_real_std if _ep_real_std > 0 else 0.0
+                        if pick_side == "UNDER":
+                            _ep_z = -_ep_z
+                        _ep_ml_prob = round(1.0 / (1.0 + _ep_math.exp(-_ep_z * 0.8)), 3)
 
-                        # Win-rate context adjustment (by prop type)
-                        _ep_wr_type = (_ep_wr_ctx.get("by_type", {}) or {}).get(prop_type, {})
-                        if _ep_wr_type and _ep_wr_type.get("count", 0) >= 10:
-                            _r = _ep_wr_type["win_rate"] / 100
-                            _ep_wr_adj = (4 if _r >= 0.62 else 2 if _r >= 0.56 else
-                                         -5 if _r <= 0.40 else -2 if _r <= 0.46 else 0)
-                            if _ep_wr_adj:
-                                confidence = max(0, confidence + _ep_wr_adj)
+                        # B2B flag for this player's team
+                        _ep_is_b2b = bool(_ep_b2b and any(kw in _p_team_ep for kw in _ep_b2b))
 
-                        # Line movement tracking
+                        # Line movement
                         _ep_lm = track_line_movement(player, float(line))
 
-                        if is_elite_pick(edge, confidence, prop_type=prop_type):
-                            # ── Gate 1: Role alignment check (advisory — adds tag, never kills pick) ──
-                            _prop_role_tag = ""
-                            _role_mismatch_warn = ""
-                            try:
-                                from game_script import analyze_game_script as _ags_prop, assign_role as _ar_prop
-                                _gd_ep     = _games_data.get(game, {})
-                                _ep_total  = float(_gd_ep.get("total",  220) or 220)
-                                _ep_spread = float(_gd_ep.get("spread",  5)  or 5)
-                                _prop_gs = _ags_prop(home_team, away_team, _ep_total, _ep_spread)
-                                _p_team  = stats.get("team", "")
-                                _is_home = any(w in _p_team.lower() for w in home_team.lower().split())
-                                _prop_role = _ar_prop(
-                                    player       = player,
-                                    team         = _p_team,
-                                    avg_pts      = float(stats.get("pred_pts") or 0),
-                                    avg_reb      = float(stats.get("pred_reb") or 0),
-                                    avg_ast      = float(stats.get("pred_ast") or 0),
-                                    avg_mins     = float(avg_mins or 28),
-                                    avg_usage    = float(avg_usage or 15),
-                                    game_script  = _prop_gs,
-                                    is_home      = _is_home,
-                                )
-                                _prop_role_tag = _prop_role.role
-                                # Role-prop mismatches: advisory warning only, does NOT block pick.
-                                # Big men (glass_cleaner/rim_anchor) CAN score — removed "points" block.
-                                _mismatches = {
-                                    "go_to_scorer":    ["rebounds"],
-                                    "floor_general":   ["rebounds"],
-                                    "glass_cleaner":   ["assists", "threes", "3pm"],
-                                    "rim_anchor":      ["assists", "threes", "3pm"],
-                                    "spot_up_shooter": ["rebounds", "assists"],
-                                    "combo_creator":   ["rebounds"],
-                                    "sixth_man":       ["rebounds"],
-                                    "utility_player":  [],
-                                }
-                                if prop_type in _mismatches.get(_prop_role_tag, []):
-                                    _role_mismatch_warn = ""  # advisory only — not shown to users
-                                    print(f"  [Role:{_prop_role_tag}] {player} {prop_type} advisory — mismatch noted, pick proceeds")
-                            except Exception:
-                                pass  # fail-open: role check is advisory
+                        # Game script with real Vegas total + spread
+                        _ep_gs = None
+                        try:
+                            from game_script import analyze_game_script as _ags_ep
+                            _gd_ep     = _games_data.get(game, {})
+                            _ep_total  = float(_gd_ep.get("total",  220) or 220)
+                            _ep_spread = float(_gd_ep.get("spread",   5) or 5)
+                            _ep_gs     = _ags_ep(home_team, away_team, _ep_total, _ep_spread)
+                        except Exception as _gse:
+                            print(f"  [EliteProp] game script build failed for {game}: {_gse}")
 
-                            # ── Gate 2: Juice trap check (quantitative — can block pick) ─────────
-                            _prop_juice_ok   = True
-                            _prop_juice_warn = ""
-                            try:
-                                _prop_odds = float(prop.get("odds", -110))
-                                from decision_engine import juice_test as _jt_prop
-                                _jt_res = _jt_prop(_prop_odds)
-                                if _jt_res.flag == "RED":
-                                    # Heavy juice: require model to beat implied prob by ≥5%
-                                    from decision_engine import implied_probability as _ip_prop
-                                    _imp = _ip_prop(_prop_odds)
-                                    _stat_history = stat_vals[:10] if stat_vals else []
-                                    _prop_true_prob = float(calculate_confidence(edge, variance,
-                                                        history=_stat_history, line=line,
-                                                        direction=pick_side)) / 100
-                                    if _prop_true_prob < _imp + 0.05:
-                                        _prop_juice_ok = False
-                                        print(f"  [Juice:RED] {player} {prop_type} {_prop_odds} — model {round(_prop_true_prob*100,1)}% ≤ implied {round(_imp*100,1)}%+5%")
-                                    else:
-                                        _prop_juice_warn = " ⚠️"
-                                elif _jt_res.flag == "YELLOW":
-                                    _prop_juice_warn = " ⚡"
-                            except Exception:
-                                pass  # fail-open
+                        if _ep_gs is None:
+                            continue   # L1 hard block: no valid game script
 
-                            if _prop_juice_ok:
-                                unit = UNIT.get(prop_type, prop_type)
-                                _role_suffix = f" [{_prop_role_tag}]" if _prop_role_tag else ""
+                        # ── Route through the full 11-layer engine ───────────────
+                        from decision_engine import run_full_pipeline as _rfp_ep
+                        _ep_leg = _rfp_ep(
+                            player           = player,
+                            team             = stats.get("team", ""),
+                            game             = game,
+                            stat             = prop_type,
+                            direction        = pick_side,
+                            line             = float(line),
+                            odds             = _ep_odds,
+                            prediction       = float(prediction),
+                            stat_std         = _ep_real_std,
+                            player_stats     = stats,
+                            game_script      = _ep_gs,
+                            public_pct       = 0.0,
+                            line_movement    = _ep_lm,
+                            line_decision    = prop.get("decision", "RISK"),
+                            shadow_hit_rates = _ep_shadow_rates,
+                            win_rate_context = _ep_wr_ctx,
+                            ml_prediction    = _ep_ml_prob,
+                            injury_report    = injuries,
+                            back_to_back     = _ep_is_b2b,
+                            target_channel   = "VIP",
+                            is_shadow        = False,
+                        )
 
-                                # ── Real prob + edge (same formula as all live picks) ──
-                                from decision_engine import implied_probability as _ip_ep
-                                _ep_odds    = float(prop.get("odds", -110))
-                                # Use real per-player std from game log; only fall back
-                                # to the league-wide constant when < 5 games exist.
-                                _ep_real_std = float(np.std(stat_vals)) if len(stat_vals) >= 5 else _PROP_STD.get(prop_type, 5.0)
-                                _ep_sf      = _norm_sf(line, prediction, _ep_real_std)
-                                _ep_prob    = round(_ep_sf if pick_side == "OVER" else 1.0 - _ep_sf, 4)
-                                _ep_implied = round(_ip_ep(_ep_odds), 4)
-                                _ep_edge    = round(_ep_prob - _ep_implied, 4)
-                                # Real EV: (true_prob × win_payout) − (1 − true_prob)
-                                _ep_win_pay = (_ep_odds / 100) if _ep_odds > 0 else (100 / abs(_ep_odds)) if _ep_odds != 0 else 0.909
-                                _ep_ev      = round((_ep_prob * _ep_win_pay) - (1 - _ep_prob), 4)
-
-                                # FanDuel-style odds display
-                                _ep_odds_disp = int(_ep_odds)
-                                _ep_odds_str  = f"+{_ep_odds_disp}" if _ep_odds_disp > 0 else str(_ep_odds_disp)
-                                elite_picks.append(
-                                    f"✅ {player} — *{_fd_label(prop_type, line, pick_side)}*  ({_ep_odds_str})"
-                                )
-                                all_picks.append({
-                                    "game":          game,
-                                    "player":        player,
-                                    "pick":          pick_side,
-                                    "line":          line,
-                                    "odds":          _ep_odds,
-                                    "prob":          _ep_prob,
-                                    "edge_real":     _ep_edge,
-                                    "implied":       _ep_implied,
-                                    "ev":            _ep_ev,
-                                    "confidence":    confidence,
-                                    "bet_size":      50,
-                                    "prop_type":     prop_type,
-                                    "prediction":    round(prediction, 1),
-                                    "is_starter":    is_starter,
-                                    "avg_mins":      avg_mins,
-                                    "avg_usage":     avg_usage,
-                                    "role":          _prop_role_tag,
-                                    "line_movement": _ep_lm,
-                                })
+                        if _ep_leg is not None:
+                            # FanDuel-style odds display
+                            _ep_odds_disp = int(_ep_odds)
+                            _ep_odds_str  = f"+{_ep_odds_disp}" if _ep_odds_disp > 0 else str(_ep_odds_disp)
+                            elite_picks.append(
+                                f"✅ {player} — *{_fd_label(prop_type, line, pick_side)}*  ({_ep_odds_str})"
+                            )
+                            all_picks.append({
+                                "game":          game,
+                                "player":        player,
+                                "pick":          pick_side,
+                                "line":          line,
+                                "odds":          _ep_odds,
+                                "prob":          _ep_leg.true_prob,
+                                "edge_real":     _ep_leg.edge,
+                                "implied":       _ep_leg.implied_prob,
+                                "ev":            _ep_leg.ev,
+                                "confidence":    _ep_leg.confidence,
+                                "bet_size":      50,
+                                "prop_type":     prop_type,
+                                "prediction":    round(prediction, 1),
+                                "is_starter":    is_starter,
+                                "avg_mins":      avg_mins,
+                                "avg_usage":     avg_usage,
+                                "role":          _ep_leg.role,
+                                "line_movement": _ep_lm,
+                            })
 
                     # Cap elite picks to 4 per player — prevents one star
                     # flooding the card with too many near-identical combo props
