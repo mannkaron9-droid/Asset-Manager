@@ -3411,27 +3411,34 @@ def cmd_update_cgp(chat_id):
     live_games       = _fetch_bdl_live_games()
     live_in_progress = [g for g in live_games if g["status"] == "in"]
 
+    _GAME_LEVEL_TYPES = {"TOTAL", "SPREAD", "MONEYLINE", "ML", "OVER", "UNDER"}
     blocks = [f"📡 *🔗 CROSS-GAME PARLAY — Live Status*\n{D}"]
+    shown = 0
     for leg in _todays_parlay_legs:
         desc     = leg.get("desc", "")
         game     = leg.get("game", "")
         bet_type = leg.get("bet_type", "").upper()
+
+        # CGP is props only — skip any game-level legs (those belong in /updateml)
+        is_game_level = (
+            bet_type in _GAME_LEVEL_TYPES
+            or desc.upper().startswith("GAME TOTAL")
+            or desc.upper().startswith("SPREAD ")
+            or desc.upper().startswith("MONEYLINE")
+        )
+        if is_game_level:
+            continue
+
         m        = _re.search(r'(OVER|UNDER)\s+([\d.]+)', desc.upper())
         direction = m.group(1) if m else "OVER"
         line      = float(m.group(2)) if m else 0
         label     = f"CGP — {desc} ({game})"
-
-        is_game_level = (
-            bet_type in ("TOTAL", "SPREAD")
-            or desc.upper().startswith("GAME TOTAL")
-            or desc.upper().startswith("SPREAD")
-        )
-        if is_game_level:
-            block = _check_game_total_live(game, direction, line, live_games)
-        else:
-            block, _ = _check_player_live_pick(desc, desc, line, live_in_progress)
-
+        block, _ = _check_player_live_pick(desc, desc, line, live_in_progress)
         blocks.append(f"\n🎯 *{label}*\n{block}")
+        shown += 1
+
+    if shown == 0:
+        blocks.append("\n_No player prop legs in pool yet — spreads/totals belong in /updateml_")
 
     if not live_in_progress:
         blocks.append("\n_No live games right now_")
