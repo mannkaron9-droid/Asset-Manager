@@ -12899,6 +12899,38 @@ def run_full_system():
 
         all_picks = []
 
+        # ── Load learning signals once before processing all games ──────────────
+        try:
+            _ep_shadow_rates = _load_shadow_hit_rates()
+            print(f"[EliteProp] Shadow hit rates: {len(_ep_shadow_rates)} entries")
+        except Exception as _e:
+            _ep_shadow_rates = {}
+            print(f"[EliteProp] Shadow hit rates skipped: {_e}")
+
+        try:
+            _ep_wr_ctx = _load_win_rate_context()
+        except Exception as _e:
+            _ep_wr_ctx = {}
+            print(f"[EliteProp] Win-rate context skipped: {_e}")
+
+        try:
+            _ep_b2b = detect_back_to_back_teams()
+            if _ep_b2b:
+                print(f"[EliteProp] B2B teams: {_ep_b2b}")
+        except Exception as _e:
+            _ep_b2b = set()
+            print(f"[EliteProp] B2B detection skipped: {_e}")
+
+        try:
+            from bot.adaptive_thresholds import run_adaptive_update as _ep_ada_fn
+            _ep_ada_c = _db_conn()
+            if _ep_ada_c:
+                _ep_ada = _ep_ada_fn(_ep_ada_c)
+                _ep_ada_c.close()
+                print(f"[EliteProp] Adaptive: {_ep_ada['tier']} ({_ep_ada['win_rate']:.1%}) — {_ep_ada['label']}")
+        except Exception as _e:
+            print(f"[EliteProp] Adaptive threshold update skipped: {_e}")
+
         for game, players_dict in list(by_game.items()):
             game_prop_key = f"{game}:GAME_PROPS"
             if game_prop_key in _props_sent_today:
@@ -13053,13 +13085,50 @@ def run_full_system():
                                 direction=pick_side,
                             )
                         )
+
+                        # ── Apply learning signals to confidence ─────────────────
+                        _p_team_ep = str(stats.get("team", "")).lower()
+
+                        # B2B fatigue penalty (-8 conf for road-night players)
+                        if _ep_b2b and any(kw in _p_team_ep for kw in _ep_b2b):
+                            confidence = max(0, confidence - 8)
+                            print(f"  [EliteProp] {player} B2B fatigue: conf→{confidence}")
+
+                        # Shadow hit rate adjustment (5–9 samples → edge bonus/penalty)
+                        _ep_sh_key = f"{player.lower()}:{prop_type.lower()}"
+                        _ep_sh     = _ep_shadow_rates.get(_ep_sh_key, {})
+                        if _ep_sh and 5 <= _ep_sh.get("total", 0) < 10:
+                            _ep_sh_rate = _ep_sh["rate"]
+                            _ep_sh_adj  = (5  if _ep_sh_rate >= 0.65 else
+                                           2  if _ep_sh_rate >= 0.55 else
+                                          -6  if _ep_sh_rate <= 0.35 else
+                                          -3  if _ep_sh_rate <= 0.45 else 0)
+                            if _ep_sh_adj:
+                                confidence = max(0, confidence + _ep_sh_adj)
+                                print(f"  [EliteProp] {player} shadow ({_ep_sh_rate:.0%} n={_ep_sh['total']}): {_ep_sh_adj:+d} conf→{confidence}")
+
+                        # Win-rate context adjustment (by prop type)
+                        _ep_wr_type = (_ep_wr_ctx.get("by_type", {}) or {}).get(prop_type, {})
+                        if _ep_wr_type and _ep_wr_type.get("count", 0) >= 10:
+                            _r = _ep_wr_type["win_rate"] / 100
+                            _ep_wr_adj = (4 if _r >= 0.62 else 2 if _r >= 0.56 else
+                                         -5 if _r <= 0.40 else -2 if _r <= 0.46 else 0)
+                            if _ep_wr_adj:
+                                confidence = max(0, confidence + _ep_wr_adj)
+
+                        # Line movement tracking
+                        _ep_lm = track_line_movement(player, float(line))
+
                         if is_elite_pick(edge, confidence, prop_type=prop_type):
                             # ── Gate 1: Role alignment check (advisory — adds tag, never kills pick) ──
                             _prop_role_tag = ""
                             _role_mismatch_warn = ""
                             try:
                                 from game_script import analyze_game_script as _ags_prop, assign_role as _ar_prop
-                                _prop_gs = _ags_prop(home_team, away_team, 220, 5)
+                                _gd_ep     = _games_data.get(game, {})
+                                _ep_total  = float(_gd_ep.get("total",  220) or 220)
+                                _ep_spread = float(_gd_ep.get("spread",  5)  or 5)
+                                _prop_gs = _ags_prop(home_team, away_team, _ep_total, _ep_spread)
                                 _p_team  = stats.get("team", "")
                                 _is_home = any(w in _p_team.lower() for w in home_team.lower().split())
                                 _prop_role = _ar_prop(
@@ -13142,23 +13211,24 @@ def run_full_system():
                                     f"✅ {player} — *{_fd_label(prop_type, line, pick_side)}*  ({_ep_odds_str})"
                                 )
                                 all_picks.append({
-                                    "game":       game,
-                                    "player":     player,
-                                    "pick":       pick_side,
-                                    "line":       line,
-                                    "odds":       _ep_odds,
-                                    "prob":       _ep_prob,
-                                    "edge_real":  _ep_edge,
-                                    "implied":    _ep_implied,
-                                    "ev":         _ep_ev,
-                                    "confidence": confidence,
-                                    "bet_size":   50,
-                                    "prop_type":  prop_type,
-                                    "prediction": round(prediction, 1),
-                                    "is_starter": is_starter,
-                                    "avg_mins":   avg_mins,
-                                    "avg_usage":  avg_usage,
-                                    "role":       _prop_role_tag,
+                                    "game":          game,
+                                    "player":        player,
+                                    "pick":          pick_side,
+                                    "line":          line,
+                                    "odds":          _ep_odds,
+                                    "prob":          _ep_prob,
+                                    "edge_real":     _ep_edge,
+                                    "implied":       _ep_implied,
+                                    "ev":            _ep_ev,
+                                    "confidence":    confidence,
+                                    "bet_size":      50,
+                                    "prop_type":     prop_type,
+                                    "prediction":    round(prediction, 1),
+                                    "is_starter":    is_starter,
+                                    "avg_mins":      avg_mins,
+                                    "avg_usage":     avg_usage,
+                                    "role":          _prop_role_tag,
+                                    "line_movement": _ep_lm,
                                 })
 
                     # Cap elite picks to 4 per player — prevents one star
