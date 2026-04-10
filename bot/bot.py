@@ -1851,13 +1851,17 @@ def _save_pick_legs_to_bets(candidates, bet_type, game_label, timestamp=None):
             if not pname or not pick or str(pname).strip() in ("None", "none", ""):
                 continue
 
-            # Deduplication: check before insert (ON CONFLICT DO NOTHING alone is
-            # not sufficient because the bets table has no unique constraint on
-            # (game, player, pick, bet_type) — only on the serial primary key).
+            # Deduplication: same player + pick + game on the same calendar date
+            # is always a duplicate — regardless of bet_type label.
+            # This prevents the same prop being saved twice when the prop wave
+            # and the regular run cycle both process the same pick.
             try:
                 cur.execute(
-                    "SELECT 1 FROM bets WHERE game=%s AND player=%s AND pick=%s AND bet_type=%s",
-                    (game_label, pname, pick, bet_type)
+                    """SELECT 1 FROM bets
+                       WHERE game=%s AND player=%s AND pick=%s
+                         AND DATE(COALESCE(bet_time, created_at)
+                             AT TIME ZONE 'America/New_York') = CURRENT_DATE""",
+                    (game_label, pname, pick)
                 )
                 if cur.fetchone():
                     continue
