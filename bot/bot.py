@@ -15056,9 +15056,9 @@ def _build_cross_game_parlay(pool):
                 hv_count[0] += 1
         return selected
 
-    safe_size = min(len(script_pool), 4)
-    bal_size  = min(len(script_pool), 6)
-    agg_size  = min(len(script_pool), 8)
+    safe_size = len(script_pool)
+    bal_size  = len(script_pool)
+    agg_size  = len(script_pool)
 
     safe       = _greedy_cgp(script_pool, safe_size, "primary",          max_per_game=1)
     balanced   = _greedy_cgp(script_pool, bal_size,  "primary+secondary", max_per_game=2)
@@ -16659,9 +16659,9 @@ def send_sgp_for_game(game_name, game_legs):
             remaining.remove(best)
         return selected
 
-    safe_size = min(len(script_pool), 4)
-    bal_size  = min(len(script_pool), 6)
-    agg_size  = min(len(script_pool), 8)
+    safe_size = len(script_pool)
+    bal_size  = len(script_pool)
+    agg_size  = len(script_pool)
 
     # SAFE: best primary-fit legs
     safe = _greedy_pick(script_pool, safe_size, "primary")
